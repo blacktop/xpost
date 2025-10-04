@@ -29,7 +29,35 @@ go install github.com/blacktop/xpost@latest
 
 Or download the latest [release](https://github.com/blacktop/xpost/releases/latest)
 
-Send message to all supported netorks
+### Configuration
+
+Set environment variables for the platforms you want to use:
+
+**Twitter/X**
+```bash
+export XPOST_TWITTER_CONSUMER_KEY="your_key"
+export XPOST_TWITTER_CONSUMER_SECRET="your_secret"
+export XPOST_TWITTER_ACCESS_TOKEN="your_token"
+export XPOST_TWITTER_ACCESS_TOKEN_SECRET="your_token_secret"
+```
+
+**Mastodon**
+```bash
+export XPOST_MASTODON_SERVER="https://mastodon.social"
+export XPOST_MASTODON_ACCESS_TOKEN="your_token"
+export XPOST_MASTODON_CLIENT_ID="your_client_id"
+export XPOST_MASTODON_CLIENT_SECRET="your_client_secret"
+```
+
+**BlueSky**
+```bash
+export XPOST_BLUESKY_HANDLE="your.handle"
+export XPOST_BLUESKY_APP_PASSWORD="your_app_password"
+```
+
+### Usage
+
+Send message to all supported networks
 
 ```bash
 ❱ xpost -m test --image docs/logo.webp
