@@ -7,204 +7,230 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime/multipart"
 	"net/http"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/blacktop/xpost/internal/logutil"
 	"github.com/blacktop/xpost/internal/xpost"
-	twitterapi "github.com/dghubble/go-twitter/twitter"
-	"github.com/dghubble/oauth1"
+	"github.com/michimani/gotwi"
+	"github.com/michimani/gotwi/media/upload"
+	uploadtypes "github.com/michimani/gotwi/media/upload/types"
+	"github.com/michimani/gotwi/resources"
+	"github.com/michimani/gotwi/tweet/managetweet"
+	managetweettypes "github.com/michimani/gotwi/tweet/managetweet/types"
 )
 
 const (
-	envConsumerKey       = "XPOST_TWITTER_CONSUMER_KEY"
-	envConsumerSecret    = "XPOST_TWITTER_CONSUMER_SECRET"
-	envAccessToken       = "XPOST_TWITTER_ACCESS_TOKEN"
-	envAccessTokenSecret = "XPOST_TWITTER_ACCESS_TOKEN_SECRET"
+	envAPIKey       = "XPOST_TWITTER_CONSUMER_KEY"
+	envAPISecret    = "XPOST_TWITTER_CONSUMER_SECRET"
+	envAccessToken  = "XPOST_TWITTER_ACCESS_TOKEN"
+	envAccessSecret = "XPOST_TWITTER_ACCESS_TOKEN_SECRET"
 
-	mediaUploadURL   = "https://upload.twitter.com/1.1/media/upload.json"
-	mediaMetadataURL = "https://upload.twitter.com/1.1/media/metadata/create.json"
-	requestTimeout   = 30 * time.Second
-	providerName     = "twitter"
+	providerName = "twitter"
+
+	metadataEndpoint = "https://upload.twitter.com/1.1/media/metadata/create.json"
 )
 
-// Config holds the credentials required to authenticate with Twitter.
+var httpTimeout = 30 * time.Second
+
+// Config captures the credentials required for OAuth 1.0a user-context requests.
 type Config struct {
-	ConsumerKey    string
-	ConsumerSecret string
-	AccessToken    string
-	AccessSecret   string
+	APIKey       string
+	APISecret    string
+	AccessToken  string
+	AccessSecret string
 }
 
-// Client implements the xpost.Poster interface for Twitter/X.
+// Client implements the Poster interface for X (Twitter).
 type Client struct {
-	httpClient    *http.Client
-	twitterClient *twitterapi.Client
+	api *gotwi.Client
 }
 
-// New constructs a Twitter poster using credentials from the environment.
+// New constructs a Twitter poster using gotwi and OAuth 1.0a credentials.
 func New(ctx context.Context) (xpost.Poster, error) {
 	cfg, err := loadConfigFromEnv()
 	if err != nil {
 		return nil, err
 	}
 
-	oauthConfig := oauth1.NewConfig(cfg.ConsumerKey, cfg.ConsumerSecret)
-	token := oauth1.NewToken(cfg.AccessToken, cfg.AccessSecret)
-	httpClient := oauthConfig.Client(context.Background(), token)
-	httpClient.Timeout = requestTimeout
+	httpClient := &http.Client{Timeout: httpTimeout}
+	debugEnabled := os.Getenv("XPOST_TWITTER_DEBUG") == "1" || logutil.Verbose()
 
-	client := twitterapi.NewClient(httpClient)
+	client, err := gotwi.NewClient(&gotwi.NewClientInput{
+		HTTPClient:           httpClient,
+		AuthenticationMethod: gotwi.AuthenMethodOAuth1UserContext,
+		OAuthToken:           cfg.AccessToken,
+		OAuthTokenSecret:     cfg.AccessSecret,
+		APIKey:               cfg.APIKey,
+		APIKeySecret:         cfg.APISecret,
+		Debug:                debugEnabled,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create X client: %w", err)
+	}
 
-	return &Client{
-		httpClient:    httpClient,
-		twitterClient: client,
-	}, nil
+	if !client.IsReady() {
+		return nil, fmt.Errorf("twitter client not ready")
+	}
+
+	return &Client{api: client}, nil
 }
 
-// Name identifies the provider.
+// Name returns the provider identifier.
 func (c *Client) Name() string { return providerName }
 
-// Post publishes a message (and optional image) to Twitter/X.
+// Post publishes the message (and optional media) to X.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {
-	params := &twitterapi.StatusUpdateParams{}
-
-	if req.ImagePath != "" {
-		mediaID, err := c.uploadMedia(ctx, req.ImagePath)
+	var mediaIDs []string
+	if strings.TrimSpace(req.ImagePath) != "" {
+		logutil.Debugf("uploading media: path=%s", req.ImagePath)
+		mediaID, err := c.uploadMedia(ctx, req.ImagePath, req.ImageAlt)
 		if err != nil {
-			return fmt.Errorf("upload media: %w", err)
+			return err
 		}
-
-		if req.ImageAlt != "" {
-			if err := c.setAltText(ctx, mediaID, req.ImageAlt); err != nil {
-				return fmt.Errorf("set alt text: %w", err)
-			}
-		}
-
-		id, err := strconv.ParseInt(mediaID, 10, 64)
-		if err != nil {
-			return fmt.Errorf("parse media id: %w", err)
-		}
-		params.MediaIds = []int64{id}
+		mediaIDs = append(mediaIDs, mediaID)
+		logutil.Debugf("media uploaded: media_id=%s", mediaID)
 	}
 
-	_, _, err := c.twitterClient.Statuses.Update(req.Message, params)
-	if err != nil {
-		return fmt.Errorf("publish status: %w", err)
+	input := &managetweettypes.CreateInput{
+		Text: gotwi.String(req.Message),
 	}
+	if len(mediaIDs) > 0 {
+		input.Media = &managetweettypes.CreateInputMedia{MediaIDs: mediaIDs}
+	}
+
+	logutil.Debugf("posting tweet: media_count=%d", len(mediaIDs))
+	if _, err := managetweet.Create(ctx, c.api, input); err != nil {
+		return fmt.Errorf("post tweet: %w", unwrapGotwiError(err))
+	}
+	logutil.Debugf("tweet posted successfully")
 
 	return nil
 }
 
-func (c *Client) uploadMedia(ctx context.Context, imagePath string) (string, error) {
-	file, err := os.Open(imagePath)
+func (c *Client) uploadMedia(ctx context.Context, imagePath, altText string) (string, error) {
+	data, err := os.ReadFile(imagePath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", xpost.ValidationError{Provider: providerName, Reason: fmt.Sprintf("image %q not found", imagePath)}
 		}
-		return "", fmt.Errorf("open image: %w", err)
+		return "", fmt.Errorf("read image: %w", err)
 	}
-	defer file.Close()
 
-	var body bytes.Buffer
-	writer := multipartWriter(&body)
-
-	part, err := writer.CreateFormFile("media", filepath.Base(imagePath))
+	mediaType, category, err := resolveMediaType(imagePath, data)
 	if err != nil {
-		return "", fmt.Errorf("create media form: %w", err)
-	}
-	if _, err := io.Copy(part, file); err != nil {
-		return "", fmt.Errorf("copy media: %w", err)
+		return "", err
 	}
 
-	if err := writer.Close(); err != nil {
-		return "", fmt.Errorf("finalize media form: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mediaUploadURL, &body)
+	logutil.Debugf("initialize upload: media_type=%s bytes=%d", mediaType, len(data))
+	initRes, err := upload.Initialize(ctx, c.api, &uploadtypes.InitializeInput{
+		MediaType:     mediaType,
+		TotalBytes:    len(data),
+		MediaCategory: category,
+	})
 	if err != nil {
-		return "", fmt.Errorf("create upload request: %w", err)
+		return "", fmt.Errorf("initialize upload: %w", err)
 	}
-	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if err := partialError(initRes.Errors); err != nil {
+		return "", fmt.Errorf("initialize upload: %w", err)
+	}
 
-	resp, err := c.httpClient.Do(req)
+	mediaID := initRes.Data.MediaID
+	logutil.Debugf("initialize complete: media_id=%s", mediaID)
+
+	appendIn := &uploadtypes.AppendInput{
+		MediaID:      mediaID,
+		Media:        bytes.NewReader(data),
+		SegmentIndex: 0,
+	}
+	appendIn.GenerateBoundary()
+
+	logutil.Debugf("append upload: media_id=%s segment=0", mediaID)
+	appendRes, err := upload.Append(ctx, c.api, appendIn)
 	if err != nil {
-		return "", fmt.Errorf("perform upload request: %w", err)
+		return "", fmt.Errorf("append upload: %w", err)
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return "", fmt.Errorf("upload failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	if err := partialError(appendRes.Errors); err != nil {
+		return "", fmt.Errorf("append upload: %w", err)
 	}
+	logutil.Debugf("append completed")
 
-	var uploadResp mediaUploadResponse
-	if err := json.NewDecoder(resp.Body).Decode(&uploadResp); err != nil {
-		return "", fmt.Errorf("decode upload response: %w", err)
+	finalizeRes, err := upload.Finalize(ctx, c.api, &uploadtypes.FinalizeInput{MediaID: mediaID})
+	if err != nil {
+		return "", fmt.Errorf("finalize upload: %w", err)
 	}
-
-	if uploadResp.MediaIDString == "" {
-		return "", fmt.Errorf("upload response missing media_id")
+	if err := partialError(finalizeRes.Errors); err != nil {
+		return "", fmt.Errorf("finalize upload: %w", err)
 	}
 
-	return uploadResp.MediaIDString, nil
+	state := finalizeRes.Data.ProcessingInfo.State
+	logutil.Debugf("finalize state=%s media_id=%s", state, mediaID)
+	switch state {
+	case "", resources.ProcessingInfoStateSucceeded:
+		// no-op
+	case resources.ProcessingInfoStateInProgress, resources.ProcessingInfoStatePending:
+		wait := time.Duration(finalizeRes.Data.ProcessingInfo.CheckAfterSecs) * time.Second
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-timer.C:
+			// simple re-check by polling finalize again (images usually succeed quickly).
+		}
+	default:
+		return "", fmt.Errorf("media processing failed: state=%s", state)
+	}
+
+	if alt := strings.TrimSpace(altText); alt != "" {
+		logutil.Debugf("setting alt text: media_id=%s", mediaID)
+		if err := c.setAltText(ctx, mediaID, alt); err != nil {
+			return "", err
+		}
+	}
+
+	return mediaID, nil
 }
 
 func (c *Client) setAltText(ctx context.Context, mediaID, altText string) error {
-	payload := map[string]any{
-		"media_id": mediaID,
-		"alt_text": map[string]string{"text": altText},
+	params := &metadataParameters{
+		mediaID: mediaID,
+		altText: altText,
 	}
 
-	buf, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("marshal alt text payload: %w", err)
-	}
+	ctx = context.WithValue(ctx, "Content-Type", "application/json;charset=UTF-8")
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, mediaMetadataURL, bytes.NewReader(buf))
-	if err != nil {
-		return fmt.Errorf("create metadata request: %w", err)
+	if err := c.api.CallAPI(ctx, metadataEndpoint, http.MethodPost, params, &metadataResponse{}); err != nil {
+		return fmt.Errorf("set alt text: %w", unwrapGotwiError(err))
 	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("perform metadata request: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return fmt.Errorf("metadata request failed: status %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
-	}
+	logutil.Debugf("alt text set: media_id=%s", mediaID)
 
 	return nil
 }
 
 func loadConfigFromEnv() (Config, error) {
 	cfg := Config{
-		ConsumerKey:    strings.TrimSpace(os.Getenv(envConsumerKey)),
-		ConsumerSecret: strings.TrimSpace(os.Getenv(envConsumerSecret)),
-		AccessToken:    strings.TrimSpace(os.Getenv(envAccessToken)),
-		AccessSecret:   strings.TrimSpace(os.Getenv(envAccessTokenSecret)),
+		APIKey:       strings.TrimSpace(os.Getenv(envAPIKey)),
+		APISecret:    strings.TrimSpace(os.Getenv(envAPISecret)),
+		AccessToken:  strings.TrimSpace(os.Getenv(envAccessToken)),
+		AccessSecret: strings.TrimSpace(os.Getenv(envAccessSecret)),
 	}
 
 	var missing []string
-	if cfg.ConsumerKey == "" {
-		missing = append(missing, envConsumerKey)
+	if cfg.APIKey == "" {
+		missing = append(missing, envAPIKey)
 	}
-	if cfg.ConsumerSecret == "" {
-		missing = append(missing, envConsumerSecret)
+	if cfg.APISecret == "" {
+		missing = append(missing, envAPISecret)
 	}
 	if cfg.AccessToken == "" {
 		missing = append(missing, envAccessToken)
 	}
 	if cfg.AccessSecret == "" {
-		missing = append(missing, envAccessTokenSecret)
+		missing = append(missing, envAccessSecret)
 	}
 
 	if len(missing) > 0 {
@@ -214,13 +240,139 @@ func loadConfigFromEnv() (Config, error) {
 	return cfg, nil
 }
 
-// multipartWriter exists to allow deterministic gofmt imports via wrapper function.
-func multipartWriter(buf *bytes.Buffer) *multipart.Writer {
-	return multipart.NewWriter(buf)
+func resolveMediaType(path string, data []byte) (uploadtypes.MediaType, uploadtypes.MediaCategory, error) {
+	ext := strings.ToLower(filepath.Ext(path))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return uploadtypes.MediaTypeJPEG, uploadtypes.MediaCategoryTweetImage, nil
+	case ".png":
+		return uploadtypes.MediaTypePNG, uploadtypes.MediaCategoryTweetImage, nil
+	case ".gif":
+		return uploadtypes.MediaTypeGIF, uploadtypes.MediaCategoryTweetGIF, nil
+	case ".webp":
+		return uploadtypes.MediaTypeWebP, uploadtypes.MediaCategoryTweetImage, nil
+	}
+
+	// fallback to simple detection
+	detected := http.DetectContentType(data)
+	switch {
+	case strings.Contains(detected, "jpeg"):
+		return uploadtypes.MediaTypeJPEG, uploadtypes.MediaCategoryTweetImage, nil
+	case strings.Contains(detected, "png"):
+		return uploadtypes.MediaTypePNG, uploadtypes.MediaCategoryTweetImage, nil
+	case strings.Contains(detected, "gif"):
+		return uploadtypes.MediaTypeGIF, uploadtypes.MediaCategoryTweetGIF, nil
+	case strings.Contains(detected, "webp"):
+		return uploadtypes.MediaTypeWebP, uploadtypes.MediaCategoryTweetImage, nil
+	}
+
+	return "", "", xpost.ValidationError{Provider: providerName, Reason: fmt.Sprintf("unsupported image type for %q", path)}
 }
 
-// mediaUploadResponse models the subset of Twitter's upload response we need.
-type mediaUploadResponse struct {
-	MediaID       int64  `json:"media_id"`
-	MediaIDString string `json:"media_id_string"`
+func partialError(partials []resources.PartialError) error {
+	if len(partials) == 0 {
+		return nil
+	}
+	msgs := make([]string, 0, len(partials))
+	for _, pe := range partials {
+		switch {
+		case pe.Detail != nil && *pe.Detail != "":
+			msgs = append(msgs, *pe.Detail)
+		case pe.Title != nil && *pe.Title != "":
+			msgs = append(msgs, *pe.Title)
+		case pe.ResourceType != nil:
+			msgs = append(msgs, fmt.Sprintf("%s", *pe.ResourceType))
+		}
+	}
+	if len(msgs) == 0 {
+		msgs = append(msgs, "unknown error")
+	}
+	return errorsJoin(msgs)
 }
+
+func errorsJoin(messages []string) error {
+	if len(messages) == 1 {
+		return fmt.Errorf("%s", messages[0])
+	}
+	return fmt.Errorf("%s", strings.Join(messages, "; "))
+}
+
+func unwrapGotwiError(err error) error {
+	var gwErr *gotwi.GotwiError
+	if errors.As(err, &gwErr) && gwErr != nil {
+		return fmt.Errorf("%s", summarizeGotwiError(gwErr))
+	}
+	return err
+}
+
+func summarizeGotwiError(err *gotwi.GotwiError) string {
+	if err == nil {
+		return "unknown X API error"
+	}
+
+	parts := make([]string, 0, 4)
+	if err.Title != "" {
+		parts = append(parts, err.Title)
+	}
+	if err.Detail != "" {
+		parts = append(parts, err.Detail)
+	}
+	for _, apiErr := range err.APIErrors {
+		if apiErr.Message != "" {
+			parts = append(parts, apiErr.Message)
+		}
+	}
+	if len(parts) == 0 {
+		if msg := err.Error(); msg != "" {
+			parts = append(parts, msg)
+		}
+	}
+	if len(parts) == 0 {
+		parts = append(parts, "X API request failed")
+	}
+
+	return strings.Join(parts, "; ")
+}
+
+type metadataParameters struct {
+	mediaID     string
+	altText     string
+	accessToken string
+}
+
+func (p *metadataParameters) SetAccessToken(token string) {
+	p.accessToken = token
+}
+
+func (p *metadataParameters) AccessToken() string {
+	return p.accessToken
+}
+
+func (p *metadataParameters) ResolveEndpoint(endpointBase string) string {
+	return endpointBase
+}
+
+func (p *metadataParameters) Body() (io.Reader, error) {
+	body := struct {
+		MediaID string `json:"media_id"`
+		AltText struct {
+			Text string `json:"text"`
+		} `json:"alt_text"`
+	}{}
+	body.MediaID = p.mediaID
+	body.AltText.Text = p.altText
+
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return bytes.NewReader(buf), nil
+}
+
+func (p *metadataParameters) ParameterMap() map[string]string {
+	return map[string]string{}
+}
+
+type metadataResponse struct{}
+
+func (metadataResponse) HasPartialError() bool { return false }

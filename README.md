@@ -1,7 +1,7 @@
 <p align="center">
-  <a href="https://github.com/blacktop/xpost"><img alt="xpost Logo" src="https://raw.githubusercontent.com/blacktop/xpost/main/docs/logo.webp" /></a>
+  <a href="https://github.com/blacktop/xpost"><img alt="xpost Logo" src="https://raw.githubusercontent.com/blacktop/xpost/main/docs/logo.webp" height="200"/></a>
   <h1 align="center">xpost</h1>
-  <h4><p align="center">Cross post to all socials</p></h4>
+  <h4><p align="center">Cross post to all socials at once from your terminal</p></h4>
   <p align="center">
     <a href="https://github.com/blacktop/xpost/actions" alt="Actions">
           <img src="https://github.com/blacktop/xpost/actions/workflows/go.yml/badge.svg" /></a>
@@ -30,9 +30,17 @@ go install github.com/blacktop/xpost@latest
 
 Or download the latest [release](https://github.com/blacktop/xpost/releases/latest)
 
-<!-- Fill this out -->
+Send message to all supported netorks
 
-![demo](vhs.gif)
+```bash
+❱ xpost -m test --image docs/logo.webp
+posting to  Bluesky...
+ posted to Bluesky
+posting to  Mastodon...
+ posted to Mastodon
+posting to  Twitter/X...
+ posted to Twitter/X
+```
 
 ## License
 

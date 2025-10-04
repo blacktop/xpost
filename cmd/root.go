@@ -30,11 +30,13 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/blacktop/xpost/internal/logutil"
 	"github.com/blacktop/xpost/internal/xpost"
 	"github.com/blacktop/xpost/internal/xpost/bluesky"
 	"github.com/blacktop/xpost/internal/xpost/mastodon"
 	"github.com/blacktop/xpost/internal/xpost/twitter"
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 )
 
 var (
@@ -43,6 +45,7 @@ var (
 	imageAlt    string
 	targetsFlag []string
 	dryRun      bool
+	verbose     bool
 )
 
 var supportedTargets = map[string]struct{}{
@@ -80,15 +83,16 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&imageAlt, "alt-text", "", "Alternative text to describe the image")
 	cmd.Flags().StringSliceVar(&targetsFlag, "target", []string{"twitter", "mastodon", "bluesky"}, "Targets to post to (twitter, mastodon, bluesky, or all)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print actions without posting")
+	cmd.PersistentFlags().BoolVarP(&verbose, "verbose", "V", false, "Enable verbose logging")
 	cmd.Flags().SortFlags = false
-
-	cmd.AddCommand(newCompletionCommand())
 
 	return cmd
 }
 
 func runRoot(cmd *cobra.Command, args []string) error {
 	ctx := cmd.Context()
+
+	logutil.SetVerbose(verbose)
 
 	message, err := resolveMessage(cmd, args)
 	if err != nil {
@@ -236,7 +240,7 @@ func buildPosters(ctx context.Context, targets []string) ([]xpost.Poster, error)
 func dispatch(ctx context.Context, posters []xpost.Poster, req xpost.Request, out io.Writer, simulate bool) error {
 	if simulate {
 		for _, poster := range posters {
-			fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", poster.Name(), req.Message)
+			fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", styledProvider(poster.Name(), out), req.Message)
 		}
 		if req.ImagePath != "" {
 			fmt.Fprintf(out, "[dry-run] image: %s (alt: %q)\n", req.ImagePath, req.ImageAlt)
@@ -246,16 +250,67 @@ func dispatch(ctx context.Context, posters []xpost.Poster, req xpost.Request, ou
 
 	var errs []error
 	for _, poster := range posters {
-		fmt.Fprintf(out, "posting to %s...\n", poster.Name())
 		if err := poster.Post(ctx, req); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", poster.Name(), err))
 			continue
 		}
-		fmt.Fprintf(out, "posted to %s\n", poster.Name())
+		fmt.Fprintf(out, "Posted to %s\n", styledProvider(poster.Name(), out))
 	}
 
 	if len(errs) > 0 {
+		for _, err := range errs {
+			fmt.Fprintf(out, "error: %v\n", err)
+		}
 		return errors.Join(errs...)
 	}
 	return nil
+}
+
+type providerStyle struct {
+	icon  string
+	label string
+	color string
+}
+
+const (
+	colorReset    = "\033[0m"
+	twitterColor  = "\033[38;5;39m"
+	mastodonColor = "\033[38;5;63m"
+	blueskyColor  = "\033[38;5;45m"
+	iconTwitter   = "\uf099"
+	iconMastodon  = "\uedc0"
+	iconBluesky   = "\ue28e" // butterfly as a playful Bluesky glyph
+)
+
+var providerStyles = map[string]providerStyle{
+	"twitter":  {icon: iconTwitter, label: "Twitter/X", color: twitterColor},
+	"mastodon": {icon: iconMastodon, label: "Mastodon", color: mastodonColor},
+	"bluesky":  {icon: iconBluesky, label: "Bluesky", color: blueskyColor},
+}
+
+func styledProvider(name string, out io.Writer) string {
+	style, ok := providerStyles[name]
+	if !ok {
+		return name
+	}
+	text := fmt.Sprintf("%s %s", style.icon, style.label)
+	return colorize(out, text, style.color)
+}
+
+func colorize(out io.Writer, text, color string) string {
+	if !supportsColor(out) || color == "" {
+		return text
+	}
+	return color + text + colorReset
+}
+
+func supportsColor(w io.Writer) bool {
+	if os.Getenv("NO_COLOR") != "" {
+		return false
+	}
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	return term.IsTerminal(int(f.Fd()))
 }
