@@ -1,5 +1,5 @@
 /*
-Copyright © <YEAR> blacktop
+Copyright © 2025 blacktop
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -21,8 +21,14 @@ THE SOFTWARE.
 */
 package main
 
-import "github.com/blacktop/TEMPLATE/cmd"
+import (
+	"os"
+
+	"github.com/blacktop/xpost/cmd"
+)
 
 func main() {
-	cmd.Execute()
+	if err := cmd.Execute(); err != nil {
+		os.Exit(1)
+	}
 }
