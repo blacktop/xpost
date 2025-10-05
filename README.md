@@ -23,6 +23,14 @@
 
 ### Install
 
+Via [homebrew](https://brew.sh)
+
+```bash
+brew install blacktop/tap/xpost
+```
+
+Via [Golang](https://go.dev/dl/)
+
 ```bash
 go install github.com/blacktop/xpost@latest
 ```
