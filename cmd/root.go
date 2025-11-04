@@ -41,6 +41,7 @@ import (
 
 var (
 	messageFlag string
+	linkFlag    string
 	imagePath   string
 	imageAlt    string
 	targetsFlag []string
@@ -79,6 +80,7 @@ func newRootCommand() *cobra.Command {
 	}
 
 	cmd.Flags().StringVarP(&messageFlag, "message", "m", "", "Message text to post")
+	cmd.Flags().StringVarP(&linkFlag, "link", "l", "", "URL to append to message (formatted with newlines)")
 	cmd.Flags().StringVar(&imagePath, "image", "", "Path to an image to attach")
 	cmd.Flags().StringVar(&imageAlt, "alt-text", "", "Alternative text to describe the image")
 	cmd.Flags().StringSliceVar(&targetsFlag, "target", []string{"twitter", "mastodon", "bluesky"}, "Targets to post to (twitter, mastodon, bluesky, or all)")
@@ -106,6 +108,7 @@ func runRoot(cmd *cobra.Command, args []string) error {
 
 	req := xpost.Request{
 		Message:   message,
+		Link:      strings.TrimSpace(linkFlag),
 		ImagePath: imagePath,
 		ImageAlt:  strings.TrimSpace(imageAlt),
 	}
@@ -239,8 +242,12 @@ func buildPosters(ctx context.Context, targets []string) ([]xpost.Poster, error)
 
 func dispatch(ctx context.Context, posters []xpost.Poster, req xpost.Request, out io.Writer, simulate bool) error {
 	if simulate {
+		message := req.Message
+		if req.Link != "" {
+			message = message + "\n\n" + req.Link
+		}
 		for _, poster := range posters {
-			fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", styledProvider(poster.Name(), out), req.Message)
+			fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", styledProvider(poster.Name(), out), message)
 		}
 		if req.ImagePath != "" {
 			fmt.Fprintf(out, "[dry-run] image: %s (alt: %q)\n", req.ImagePath, req.ImageAlt)

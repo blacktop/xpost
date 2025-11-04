@@ -7,6 +7,7 @@ type Request struct {
 	Message   string
 	ImagePath string
 	ImageAlt  string
+	Link      string // Optional URL to append to message with proper formatting
 }
 
 // Poster abstracts a social network that can publish content.
