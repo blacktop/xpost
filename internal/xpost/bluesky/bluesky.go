@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 
@@ -26,6 +27,9 @@ const (
 	providerName   = "bluesky"
 	requestTimeout = 30 * time.Second
 )
+
+// urlRegex matches URLs in text for creating link facets
+var urlRegex = regexp.MustCompile(`https?://[^\s]+`)
 
 // Config allows the caller to supply defaults prior to reading environment variables.
 type Config struct {
@@ -75,9 +79,16 @@ func (c *Client) Name() string { return providerName }
 
 // Post creates a new Bluesky post with an optional image embed.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {
+	// Build the text, appending link if provided
+	text := req.Message
+	if req.Link != "" {
+		text = text + "\n\n" + req.Link
+	}
+
 	post := &bsky.FeedPost{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
-		Text:      req.Message,
+		Text:      text,
+		Facets:    extractLinkFacets(text),
 	}
 
 	if req.ImagePath != "" {
@@ -175,4 +186,36 @@ func loadConfig(base Config) (ProviderConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// extractLinkFacets finds all URLs in the text and creates link facets for them.
+// This makes URLs clickable in the Bluesky UI.
+func extractLinkFacets(text string) []*bsky.RichtextFacet {
+	matches := urlRegex.FindAllStringIndex(text, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+
+	facets := make([]*bsky.RichtextFacet, 0, len(matches))
+	for _, match := range matches {
+		// match[0] is start index, match[1] is end index
+		url := text[match[0]:match[1]]
+
+		facets = append(facets, &bsky.RichtextFacet{
+			Index: &bsky.RichtextFacet_ByteSlice{
+				ByteStart: int64(match[0]),
+				ByteEnd:   int64(match[1]),
+			},
+			Features: []*bsky.RichtextFacet_Features_Elem{
+				{
+					RichtextFacet_Link: &bsky.RichtextFacet_Link{
+						LexiconTypeID: "app.bsky.richtext.facet#link",
+						Uri:           url,
+					},
+				},
+			},
+		})
+	}
+
+	return facets
 }
