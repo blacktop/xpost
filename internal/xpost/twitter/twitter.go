@@ -95,8 +95,14 @@ func (c *Client) Post(ctx context.Context, req xpost.Request) error {
 		logutil.Debugf("media uploaded: media_id=%s", mediaID)
 	}
 
+	// Build tweet text with link if provided
+	text := req.Message
+	if req.Link != "" {
+		text = text + "\n\n" + req.Link
+	}
+
 	input := &managetweettypes.CreateInput{
-		Text: gotwi.String(req.Message),
+		Text: gotwi.String(text),
 	}
 	if len(mediaIDs) > 0 {
 		input.Media = &managetweettypes.CreateInputMedia{MediaIDs: mediaIDs}

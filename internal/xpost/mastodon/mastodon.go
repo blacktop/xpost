@@ -67,8 +67,14 @@ func (c *Client) Post(ctx context.Context, req xpost.Request) error {
 		mediaIDs = append(mediaIDs, attachment.ID)
 	}
 
+	// Build status text with link if provided
+	status := req.Message
+	if req.Link != "" {
+		status = status + "\n\n" + req.Link
+	}
+
 	_, err := c.client.PostStatus(ctx, &mastodonapi.Toot{
-		Status:   req.Message,
+		Status:   status,
 		MediaIDs: mediaIDs,
 	})
 	if err != nil {
