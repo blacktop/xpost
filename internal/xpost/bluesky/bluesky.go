@@ -17,6 +17,7 @@ import (
 	"github.com/bluesky-social/indigo/api/bsky"
 	"github.com/bluesky-social/indigo/lex/util"
 	"github.com/bluesky-social/indigo/xrpc"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -26,6 +27,7 @@ const (
 
 	providerName   = "bluesky"
 	requestTimeout = 30 * time.Second
+	maxGraphemes   = 300 // Bluesky's post character limit in graphemes
 )
 
 // urlRegex matches URLs in text for creating link facets
@@ -76,6 +78,22 @@ func New(ctx context.Context, base Config) (xpost.Poster, error) {
 
 // Name identifies the provider.
 func (c *Client) Name() string { return providerName }
+
+// Validate checks if the request meets Bluesky's constraints.
+func (c *Client) Validate(req xpost.Request) error {
+	text := req.Message
+	if req.Link != "" {
+		text = text + "\n\n" + req.Link
+	}
+	count := uniseg.GraphemeClusterCount(text)
+	if count > maxGraphemes {
+		return xpost.ValidationError{
+			Provider: providerName,
+			Reason:   fmt.Sprintf("message too long: %d graphemes (max %d)", count, maxGraphemes),
+		}
+	}
+	return nil
+}
 
 // Post creates a new Bluesky post with an optional image embed.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {

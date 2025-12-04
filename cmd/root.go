@@ -241,6 +241,21 @@ func buildPosters(ctx context.Context, targets []string) ([]xpost.Poster, error)
 }
 
 func dispatch(ctx context.Context, posters []xpost.Poster, req xpost.Request, out io.Writer, simulate bool) error {
+	// Validate all platforms BEFORE posting to any
+	var validationErrs []error
+	for _, poster := range posters {
+		if err := poster.Validate(req); err != nil {
+			validationErrs = append(validationErrs, fmt.Errorf("%s: %w", poster.Name(), err))
+		}
+	}
+	if len(validationErrs) > 0 {
+		fmt.Fprintln(out, "Validation failed - no posts were sent:")
+		for _, err := range validationErrs {
+			fmt.Fprintf(out, "  • %v\n", err)
+		}
+		return errors.Join(validationErrs...)
+	}
+
 	if simulate {
 		message := req.Message
 		if req.Link != "" {

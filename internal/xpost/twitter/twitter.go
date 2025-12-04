@@ -30,6 +30,7 @@ const (
 	envAccessSecret = "XPOST_TWITTER_ACCESS_TOKEN_SECRET"
 
 	providerName = "twitter"
+	maxChars     = 280 // Twitter's post character limit
 
 	metadataEndpoint = "https://upload.twitter.com/1.1/media/metadata/create.json"
 )
@@ -81,6 +82,26 @@ func New(ctx context.Context) (xpost.Poster, error) {
 
 // Name returns the provider identifier.
 func (c *Client) Name() string { return providerName }
+
+// Validate checks if the request meets Twitter's constraints.
+func (c *Client) Validate(req xpost.Request) error {
+	text := req.Message
+	if req.Link != "" {
+		text = text + "\n\n" + req.Link
+	}
+	// Twitter counts characters (not graphemes), and URLs are shortened to 23 chars
+	// For simplicity, we use len() which counts bytes - this is conservative for ASCII
+	// but may over-count for multi-byte UTF-8 characters. A proper implementation
+	// would use Twitter's text parsing library.
+	count := len([]rune(text))
+	if count > maxChars {
+		return xpost.ValidationError{
+			Provider: providerName,
+			Reason:   fmt.Sprintf("message too long: %d characters (max %d)", count, maxChars),
+		}
+	}
+	return nil
+}
 
 // Post publishes the message (and optional media) to X.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {

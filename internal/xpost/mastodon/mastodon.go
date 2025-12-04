@@ -20,6 +20,7 @@ const (
 
 	providerName   = "mastodon"
 	requestTimeout = 30 * time.Second
+	maxChars       = 500 // Mastodon's default post character limit
 )
 
 // Config contains the settings needed to reach a Mastodon server.
@@ -55,6 +56,22 @@ func New(ctx context.Context) (xpost.Poster, error) {
 
 // Name identifies the provider.
 func (c *Client) Name() string { return providerName }
+
+// Validate checks if the request meets Mastodon's constraints.
+func (c *Client) Validate(req xpost.Request) error {
+	text := req.Message
+	if req.Link != "" {
+		text = text + "\n\n" + req.Link
+	}
+	count := len([]rune(text))
+	if count > maxChars {
+		return xpost.ValidationError{
+			Provider: providerName,
+			Reason:   fmt.Sprintf("message too long: %d characters (max %d)", count, maxChars),
+		}
+	}
+	return nil
+}
 
 // Post publishes a new toot to the configured Mastodon instance.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {

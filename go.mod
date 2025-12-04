@@ -7,6 +7,7 @@ require (
 	github.com/charmbracelet/log v0.4.2
 	github.com/mattn/go-mastodon v0.0.10
 	github.com/michimani/gotwi v0.18.1
+	github.com/rivo/uniseg v0.4.7
 	github.com/spf13/cobra v1.10.1
 	golang.org/x/term v0.36.0
 )
@@ -59,7 +60,6 @@ require (
 	github.com/multiformats/go-varint v0.1.0 // indirect
 	github.com/opentracing/opentracing-go v1.2.0 // indirect
 	github.com/polydawn/refmt v0.89.1-0.20221221234430-40501e09de1f // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/spaolacci/murmur3 v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
 	github.com/tomnomnom/linkheader v0.0.0-20250811210735-e5fe3b51442e // indirect

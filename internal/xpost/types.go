@@ -13,5 +13,8 @@ type Request struct {
 // Poster abstracts a social network that can publish content.
 type Poster interface {
 	Name() string
+	// Validate checks if the request meets platform constraints (character limits, etc.)
+	// without posting. Returns nil if valid.
+	Validate(req Request) error
 	Post(ctx context.Context, req Request) error
 }
