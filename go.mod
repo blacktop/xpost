@@ -9,7 +9,7 @@ require (
 	github.com/michimani/gotwi v0.18.1
 	github.com/rivo/uniseg v0.4.7
 	github.com/spf13/cobra v1.10.2
-	golang.org/x/term v0.37.0
+	golang.org/x/term v0.39.0
 )
 
 require (
@@ -75,7 +75,7 @@ require (
 	go.uber.org/zap v1.27.0 // indirect
 	golang.org/x/crypto v0.43.0 // indirect
 	golang.org/x/exp v0.0.0-20251023183803-a4bb9ffd2546 // indirect
-	golang.org/x/sys v0.38.0 // indirect
+	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	lukechampine.com/blake3 v1.4.1 // indirect
 )
