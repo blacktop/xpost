@@ -71,12 +71,11 @@ func newRootCommand() *cobra.Command {
 		Short: "Cross-post to social networks",
 		Long: "xpost publishes the same update to Twitter/X, Mastodon, and Bluesky. " +
 			"Provide your message as an argument or with --message and optional --image.",
-		SilenceUsage:  true,
-		SilenceErrors: true,
-		RunE:          runRoot,
+		SilenceUsage: true,
+		RunE:         runRoot,
 		Example: `  xpost --message "hello world" --image ./shot.png
   xpost "Ship it!" --target twitter --target mastodon
-  echo "Release shipped" | xpost --targets all`,
+  echo "Release shipped" | xpost --target all`,
 	}
 
 	cmd.Flags().StringVarP(&messageFlag, "message", "m", "", "Message text to post")
@@ -84,7 +83,7 @@ func newRootCommand() *cobra.Command {
 	cmd.Flags().StringVar(&imagePath, "image", "", "Path to an image to attach")
 	cmd.Flags().StringVar(&imageAlt, "alt-text", "", "Alternative text to describe the image")
 	cmd.Flags().StringSliceVar(&targetsFlag, "target", []string{"twitter", "mastodon", "bluesky"}, "Targets to post to (twitter, mastodon, bluesky, or all)")
-	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Print actions without posting")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "Validate and preview locally without credentials or network requests")
 	cmd.PersistentFlags().BoolVarP(&verbose, "verbose", "V", false, "Enable verbose logging")
 	cmd.Flags().SortFlags = false
 
@@ -116,12 +115,46 @@ func runRoot(cmd *cobra.Command, args []string) error {
 		req.ImageAlt = defaultAltText
 	}
 
-	posters, err := buildPosters(ctx, resolvedTargets)
+	if dryRun {
+		// Validation and preview only use request data, so avoid constructors
+		// that load credentials or create remote sessions.
+		previews := map[string]xpost.Poster{
+			"bluesky":  &bluesky.Client{},
+			"mastodon": &mastodon.Client{},
+			"twitter":  &twitter.Client{},
+		}
+		posters := make([]xpost.Poster, 0, len(resolvedTargets))
+		for _, target := range resolvedTargets {
+			poster, ok := previews[target]
+			if !ok || poster == nil {
+				return fmt.Errorf("preview for target %q is not implemented", target)
+			}
+			posters = append(posters, poster)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "[dry-run] Local text preview only; credentials, uploads, and server acceptance are not checked.")
+		return dispatch(ctx, posters, nil, req, cmd.OutOrStdout(), true)
+	}
+
+	posters, skips, err := buildPosters(ctx, resolvedTargets, explicitTargets(cmd))
 	if err != nil {
 		return err
 	}
 
-	return dispatch(ctx, posters, req, cmd.OutOrStdout(), dryRun)
+	return dispatch(ctx, posters, skips, req, cmd.OutOrStdout(), dryRun)
+}
+
+// Selecting all uses the default fan-out policy; individually named targets
+// require credentials even when another target can accept the post.
+func explicitTargets(cmd *cobra.Command) bool {
+	if !cmd.Flags().Changed("target") {
+		return false
+	}
+	for _, target := range targetsFlag {
+		if strings.EqualFold(strings.TrimSpace(target), "all") {
+			return false
+		}
+	}
+	return true
 }
 
 func resolveMessage(cmd *cobra.Command, args []string) (string, error) {
@@ -202,90 +235,144 @@ func sortedTargets(targets []string) []string {
 	return out
 }
 
-func buildPosters(ctx context.Context, targets []string) ([]xpost.Poster, error) {
+// targetSkip records a target that will not receive the post.
+type targetSkip struct {
+	name string
+	err  error
+	// fatal marks skips that should fail the command. A target left out of the
+	// default fan-out because it has no credentials is only informational.
+	fatal bool
+}
+
+func buildPosters(ctx context.Context, targets []string, explicit bool) ([]xpost.Poster, []targetSkip, error) {
 	constructors := map[string]func(context.Context) (xpost.Poster, error){
 		"bluesky": func(ctx context.Context) (xpost.Poster, error) {
 			return bluesky.New(ctx, bluesky.Config{PDSURL: defaultBlueskyPDSURL})
 		},
-		"mastodon": func(ctx context.Context) (xpost.Poster, error) {
-			return mastodon.New(ctx)
-		},
-		"twitter": func(ctx context.Context) (xpost.Poster, error) {
-			return twitter.New(ctx)
-		},
+		"mastodon": mastodon.New,
+		"twitter":  twitter.New,
 	}
 
 	posters := make([]xpost.Poster, 0, len(targets))
-	var errs []error
+	var skips []targetSkip
 	for _, target := range targets {
 		constructor, ok := constructors[target]
 		if !ok {
-			errs = append(errs, fmt.Errorf("target %q is not implemented", target))
+			skips = append(skips, targetSkip{name: target, err: errors.New("not implemented"), fatal: true})
 			continue
 		}
 		poster, err := constructor(ctx)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", target, err))
+			var missing xpost.MissingEnvError
+			skips = append(skips, targetSkip{
+				name:  target,
+				err:   err,
+				fatal: explicit || !errors.As(err, &missing),
+			})
 			continue
 		}
 		posters = append(posters, poster)
 	}
 
-	if len(errs) > 0 {
-		return nil, errors.Join(errs...)
-	}
+	// Only give up entirely when nothing is left to post to. Every reason counts
+	// here, including the missing credentials that are merely informational while
+	// some other target can still carry the post.
 	if len(posters) == 0 {
-		return nil, errors.New("no targets available")
+		errs := make([]error, 0, len(skips))
+		for _, skip := range skips {
+			errs = append(errs, fmt.Errorf("%s: %w", skip.name, skip.err))
+		}
+		if len(errs) == 0 {
+			return nil, nil, errors.New("no targets available")
+		}
+		return nil, nil, errors.Join(errs...)
 	}
-	return posters, nil
+	return posters, skips, nil
 }
 
-func dispatch(ctx context.Context, posters []xpost.Poster, req xpost.Request, out io.Writer, simulate bool) error {
-	// Validate all platforms BEFORE posting to any
-	var validationErrs []error
-	for _, poster := range posters {
-		if err := poster.Validate(req); err != nil {
-			validationErrs = append(validationErrs, fmt.Errorf("%s: %w", poster.Name(), err))
-		}
-	}
-	if len(validationErrs) > 0 {
-		fmt.Fprintln(out, "Validation failed - no posts were sent:")
-		for _, err := range validationErrs {
-			fmt.Fprintf(out, "  • %v\n", err)
-		}
-		return errors.Join(validationErrs...)
+func dispatch(ctx context.Context, posters []xpost.Poster, skips []targetSkip, req xpost.Request, out io.Writer, simulate bool) error {
+	ready, skipped := planTargets(posters, skips, req)
+	errs := reportSkips(out, skipped)
+
+	if len(ready) == 0 {
+		fmt.Fprintln(out, "No targets accepted the post")
+		return errors.Join(errs...)
 	}
 
 	if simulate {
-		message := req.Message
-		if req.Link != "" {
-			message = message + "\n\n" + req.Link
-		}
-		for _, poster := range posters {
-			fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", styledProvider(poster.Name(), out), message)
-		}
-		if req.ImagePath != "" {
-			fmt.Fprintf(out, "[dry-run] image: %s (alt: %q)\n", req.ImagePath, req.ImageAlt)
-		}
-		return nil
+		simulatePosts(out, ready, req)
+		return errors.Join(errs...)
 	}
 
+	errs = append(errs, publish(ctx, out, ready, req)...)
+	return errors.Join(errs...)
+}
+
+// planTargets validates each target on its own, so a message one network
+// rejects still goes out on the networks that accept it.
+func planTargets(posters []xpost.Poster, skips []targetSkip, req xpost.Request) ([]xpost.Poster, []targetSkip) {
+	ready := make([]xpost.Poster, 0, len(posters))
+	for _, poster := range posters {
+		if err := poster.Validate(req); err != nil {
+			skips = append(skips, targetSkip{name: poster.Name(), err: err, fatal: true})
+			continue
+		}
+		ready = append(ready, poster)
+	}
+	return ready, skips
+}
+
+func reportSkips(out io.Writer, skips []targetSkip) []error {
+	errs := make([]error, 0, len(skips))
+	for _, skip := range skips {
+		fmt.Fprintf(out, "Skipped %s: %s\n", styledProvider(skip.name, out), skipReason(skip.err))
+		if skip.fatal {
+			errs = append(errs, fmt.Errorf("%s: %w", skip.name, skip.err))
+		}
+	}
+	return errs
+}
+
+// skipReason omits provider prefixes from structured errors because the
+// printed skip line already names the target.
+func skipReason(err error) string {
+	if invalid, ok := errors.AsType[xpost.ValidationError](err); ok {
+		return invalid.Reason
+	}
+	if missing, ok := errors.AsType[xpost.MissingEnvError](err); ok {
+		return strings.TrimPrefix(missing.Error(), missing.Provider+" ")
+	}
+	return err.Error()
+}
+
+func simulatePosts(out io.Writer, posters []xpost.Poster, req xpost.Request) {
+	message := req.Message
+	if req.Link != "" {
+		message = message + "\n\n" + req.Link
+	}
+	for _, poster := range posters {
+		preview := message
+		if renderer, ok := poster.(interface{ Preview(xpost.Request) string }); ok {
+			preview = renderer.Preview(req)
+		}
+		fmt.Fprintf(out, "[dry-run] would post to %s: %q\n", styledProvider(poster.Name(), out), preview)
+	}
+	if req.ImagePath != "" {
+		fmt.Fprintf(out, "[dry-run] image: %s (alt: %q)\n", req.ImagePath, req.ImageAlt)
+	}
+}
+
+func publish(ctx context.Context, out io.Writer, posters []xpost.Poster, req xpost.Request) []error {
 	var errs []error
 	for _, poster := range posters {
 		if err := poster.Post(ctx, req); err != nil {
 			errs = append(errs, fmt.Errorf("%s: %w", poster.Name(), err))
+			fmt.Fprintf(out, "error: %s: %v\n", styledProvider(poster.Name(), out), err)
 			continue
 		}
 		fmt.Fprintf(out, "Posted to %s\n", styledProvider(poster.Name(), out))
 	}
-
-	if len(errs) > 0 {
-		for _, err := range errs {
-			fmt.Fprintf(out, "error: %v\n", err)
-		}
-		return errors.Join(errs...)
-	}
-	return nil
+	return errs
 }
 
 type providerStyle struct {

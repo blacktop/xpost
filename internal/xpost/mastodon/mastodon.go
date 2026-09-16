@@ -77,6 +77,7 @@ func (c *Client) Validate(req xpost.Request) error {
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {
 	var mediaIDs []mastodonapi.ID
 	if req.ImagePath != "" {
+		// A proxy error can hide a completed upload; do not create duplicate media.
 		attachment, err := c.uploadMedia(ctx, req.ImagePath, req.ImageAlt)
 		if err != nil {
 			return err
@@ -90,6 +91,8 @@ func (c *Client) Post(ctx context.Context, req xpost.Request) error {
 		status = status + "\n\n" + req.Link
 	}
 
+	// Without an idempotency key, a proxy failure may hide a successful post.
+	// Return ambiguous failures to the caller instead of risking duplicates.
 	_, err := c.client.PostStatus(ctx, &mastodonapi.Toot{
 		Status:   status,
 		MediaIDs: mediaIDs,

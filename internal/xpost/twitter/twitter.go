@@ -123,7 +123,7 @@ func (c *Client) Post(ctx context.Context, req xpost.Request) error {
 	}
 
 	input := &managetweettypes.CreateInput{
-		Text: gotwi.String(text),
+		Text: new(text),
 	}
 	if len(mediaIDs) > 0 {
 		input.Media = &managetweettypes.CreateInputMedia{MediaIDs: mediaIDs}

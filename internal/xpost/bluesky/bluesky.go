@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/blacktop/xpost/internal/xpost"
 	"github.com/bluesky-social/indigo/api/atproto"
@@ -28,6 +30,11 @@ const (
 	providerName   = "bluesky"
 	requestTimeout = 30 * time.Second
 	maxGraphemes   = 300 // Bluesky's post character limit in graphemes
+
+	// Link display limits mirror the Bluesky composer: a path longer than
+	// maxPathDisplay is cut to pathTruncateAt characters plus an ellipsis.
+	maxPathDisplay = 15
+	pathTruncateAt = 13
 )
 
 // urlRegex matches URLs in text for creating link facets
@@ -79,12 +86,16 @@ func New(ctx context.Context, base Config) (xpost.Poster, error) {
 // Name identifies the provider.
 func (c *Client) Name() string { return providerName }
 
-// Validate checks if the request meets Bluesky's constraints.
+// Preview returns the rendered post text without making network requests.
+func (c *Client) Preview(req xpost.Request) string {
+	text, _ := renderPost(compose(req))
+	return text
+}
+
+// Validate checks if the request meets Bluesky's constraints. Links are counted
+// at their shortened display length, which is what the post will actually carry.
 func (c *Client) Validate(req xpost.Request) error {
-	text := req.Message
-	if req.Link != "" {
-		text = text + "\n\n" + req.Link
-	}
+	text := c.Preview(req)
 	count := uniseg.GraphemeClusterCount(text)
 	if count > maxGraphemes {
 		return xpost.ValidationError{
@@ -97,16 +108,12 @@ func (c *Client) Validate(req xpost.Request) error {
 
 // Post creates a new Bluesky post with an optional image embed.
 func (c *Client) Post(ctx context.Context, req xpost.Request) error {
-	// Build the text, appending link if provided
-	text := req.Message
-	if req.Link != "" {
-		text = text + "\n\n" + req.Link
-	}
+	text, facets := renderPost(compose(req))
 
 	post := &bsky.FeedPost{
 		CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		Text:      text,
-		Facets:    extractLinkFacets(text),
+		Facets:    facets,
 	}
 
 	if req.ImagePath != "" {
@@ -206,34 +213,105 @@ func loadConfig(base Config) (ProviderConfig, error) {
 	return cfg, nil
 }
 
-// extractLinkFacets finds all URLs in the text and creates link facets for them.
-// This makes URLs clickable in the Bluesky UI.
-func extractLinkFacets(text string) []*bsky.RichtextFacet {
+// compose joins the message and the optional link into the post body.
+func compose(req xpost.Request) string {
+	if req.Link == "" {
+		return req.Message
+	}
+	return req.Message + "\n\n" + req.Link
+}
+
+// renderPost rewrites every URL in text to its short display form and returns
+// the rewritten text along with facets pointing at the full URLs. Only the
+// short label occupies the post body, so a long URL costs a handful of
+// graphemes against the 300 limit instead of its full length.
+func renderPost(text string) (string, []*bsky.RichtextFacet) {
 	matches := urlRegex.FindAllStringIndex(text, -1)
 	if len(matches) == 0 {
-		return nil
+		return text, nil
 	}
 
+	var body strings.Builder
 	facets := make([]*bsky.RichtextFacet, 0, len(matches))
+	cursor := 0
+
 	for _, match := range matches {
-		// match[0] is start index, match[1] is end index
-		url := text[match[0]:match[1]]
+		link, trailing := splitTrailingPunct(text[match[0]:match[1]])
+		if link == "" {
+			continue
+		}
+
+		body.WriteString(text[cursor:match[0]])
+		start := body.Len()
+		body.WriteString(shortenURL(link))
 
 		facets = append(facets, &bsky.RichtextFacet{
 			Index: &bsky.RichtextFacet_ByteSlice{
-				ByteStart: int64(match[0]),
-				ByteEnd:   int64(match[1]),
+				ByteStart: int64(start),
+				ByteEnd:   int64(body.Len()),
 			},
 			Features: []*bsky.RichtextFacet_Features_Elem{
 				{
 					RichtextFacet_Link: &bsky.RichtextFacet_Link{
 						LexiconTypeID: "app.bsky.richtext.facet#link",
-						Uri:           url,
+						Uri:           link,
 					},
 				},
 			},
 		})
+
+		body.WriteString(trailing)
+		cursor = match[1]
 	}
 
-	return facets
+	body.WriteString(text[cursor:])
+
+	if len(facets) == 0 {
+		return text, nil
+	}
+	return body.String(), facets
+}
+
+// splitTrailingPunct peels sentence punctuation off a matched URL so that
+// "see https://example.com/page." links the page and leaves the period as text.
+func splitTrailingPunct(match string) (string, string) {
+	end := len(match)
+	excessClosing := strings.Count(match, ")") - strings.Count(match, "(")
+	for end > 0 {
+		switch c := match[end-1]; {
+		case c == '.' || c == ',' || c == ';' || c == '!' || c == '?':
+			end--
+		case c == ')' && excessClosing > 0:
+			end--
+			excessClosing--
+		default:
+			return match[:end], match[end:]
+		}
+	}
+	return match[:end], match[end:]
+}
+
+// shortenURL renders a URL the way the Bluesky composer does: drop the scheme
+// and truncate a long path. Mirrors toShortUrl in bluesky-social/social-app.
+func shortenURL(raw string) string {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return raw
+	}
+
+	path := parsed.EscapedPath()
+	if path == "/" {
+		path = ""
+	}
+	if parsed.RawQuery != "" {
+		path += "?" + parsed.RawQuery
+	}
+	if parsed.Fragment != "" {
+		path += "#" + parsed.EscapedFragment()
+	}
+
+	if utf8.RuneCountInString(path) > maxPathDisplay {
+		return parsed.Host + string([]rune(path)[:pathTruncateAt]) + "..."
+	}
+	return parsed.Host + path
 }
