@@ -143,6 +143,47 @@ describe("password login", () => {
     expect(x.loginAttempts).toBe(1);
   });
 
+  test.each([
+    { op: "check", image: false, scenario: "popupComposer" },
+    { op: "post", image: false, scenario: "popupComposer" },
+    { op: "post", image: true, scenario: "popupComposer" },
+    { op: "post", image: true, scenario: "popupReplacesAfterUpload" },
+  ] satisfies { op: string; image: boolean; scenario: Scenario }[])(
+    "$scenario: $op with image=$image uses the reachable popup composer",
+    async ({ op, image, scenario }) => {
+      x.reset(scenario);
+      const stateFile = join(workdir, "state.json");
+      await writeFile(
+        stateFile,
+        JSON.stringify({
+          cookies: [
+            stateCookie("auth_token", "fixture-token", "127.0.0.1", "/", true),
+            stateCookie("twid", `u%3D${x.accountID}`, "127.0.0.1"),
+          ],
+          origins: [],
+        }),
+      );
+      const text = "popup draft\n\nhttps://example.com/popup";
+      const imagePath = image ? join(workdir, "shot.png") : undefined;
+      if (imagePath) await writeFile(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+      const run = await runHelper(request({ op, stateFile, password: undefined, text, imagePath }));
+      expect(run.result).toMatchObject({
+        outcome: op === "check" ? "checked" : "posted",
+        sessionSource: "state",
+      });
+      expect(x.posts).toEqual(op === "check" ? [] : [{ text, hasMedia: image }]);
+      expect(x.loginAttempts).toBe(0);
+      expect(run.stdout + run.stderr).not.toContain("private background draft");
+    },
+  );
+
+  test("a replaced editor cannot pass the draft check using detached text", async () => {
+    x.reset("replacesComposer");
+    const run = await runHelper(request());
+    expect(run.result).toMatchObject({ outcome: "failed", reason: "composerUnavailable" });
+    expect(x.posts).toEqual([]);
+  });
+
   test("a saved state that no longer signs in falls back to the password", async () => {
     const stateFile = join(workdir, "state.json");
     await writeFile(stateFile, JSON.stringify({ cookies: [], origins: [] }));
@@ -432,16 +473,23 @@ describe("composer", () => {
     expect(x.posts).toEqual([{ text: expect.any(String), hasMedia: true }]);
   });
 
-  test("a failed upload stops before the text is posted", async () => {
-    x.reset("uploadFails");
-    const image = join(workdir, "shot.png");
-    await writeFile(image, Buffer.from([1]));
+  test.each(["uploadFails", "popupUploadFails", "popupGlobalUploadFails"] satisfies Scenario[])(
+    "%s stops before the text is posted",
+    async (scenario) => {
+      x.reset(scenario);
+      const image = join(workdir, "shot.png");
+      await writeFile(image, Buffer.from([1]));
 
-    const run = await runHelper(request({ imagePath: image }));
+      const run = await runHelper(request({ imagePath: image, timeoutMs: 10_000 }));
 
-    expect(run.result).toMatchObject({ outcome: "failed", reason: "uploadFailed" });
-    expect(x.posts).toEqual([]);
-  });
+      expect(run.result).toMatchObject({
+        outcome: "failed",
+        reason: "uploadFailed",
+        detail: "image upload failed: Media upload failed.",
+      });
+      expect(x.posts).toEqual([]);
+    },
+  );
 
   test("the state file's directory is created privately when missing", async () => {
     const stateFile = join(workdir, "nested", "deeper", "state.json");

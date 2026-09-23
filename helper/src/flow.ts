@@ -6,7 +6,14 @@ import { existsSync } from "node:fs";
 import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { type Browser, type BrowserContext, type Locator, type Page, chromium } from "playwright";
+import {
+  type Browser,
+  type BrowserContext,
+  type ElementHandle,
+  type Locator,
+  type Page,
+  chromium,
+} from "playwright";
 
 import type { FailureReason, HelperRequest, HelperResult, SessionSource } from "./protocol.ts";
 
@@ -114,6 +121,39 @@ async function firstVisible(
     await delay(250);
   }
   return undefined;
+}
+
+/** X keeps another editor behind its popup; select the element a centre click reaches. */
+async function reachableComposer(
+  page: Page,
+  timeoutMs: number,
+): Promise<ElementHandle<HTMLElement>> {
+  try {
+    const handle = await page.waitForFunction(
+      (selector) => {
+        for (const element of document.querySelectorAll<HTMLElement>(selector)) {
+          const box = element.getBoundingClientRect();
+          if (box.width <= 0 || box.height <= 0) continue;
+          const hit = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+          if (hit && (element === hit || element.contains(hit))) return element;
+        }
+        return null;
+      },
+      selectors.textarea,
+      { timeout: Math.max(1, timeoutMs) },
+    );
+    const element = handle.asElement();
+    if (element) return element;
+    await handle.dispose();
+    throw new Error("composer is no longer available");
+  } catch (error) {
+    // Playwright's later call-log lines can contain draft text.
+    const detail = error instanceof Error ? error.message.split("\n")[0] : "unknown browser error";
+    throw new FlowFailure(
+      "composerUnavailable",
+      `composer did not open: ${detail} (url: ${page.url()})`,
+    );
+  }
 }
 
 export async function run(request: HelperRequest): Promise<HelperResult> {
@@ -228,12 +268,8 @@ async function drive(
     await page.goto(composeURL, { timeout: deadline.remaining(30_000) });
   }
   deadline.check("opening the composer");
-  const textarea = page.locator(selectors.textarea);
-  try {
-    await textarea.waitFor({ state: "visible", timeout: deadline.remaining(30_000) });
-  } catch {
-    throw new FlowFailure("composerUnavailable", `composer did not open (url: ${page.url()})`);
-  }
+  const textarea = await reachableComposer(page, deadline.remaining(30_000));
+  await textarea.dispose();
 
   if (request.op === "check") {
     await requireEnglishComposer(page);
@@ -338,33 +374,83 @@ async function stopOnChallenge(page: Page, seen: string | undefined): Promise<ne
   throw new FlowFailure("loginFailed", `sign-in did not finish (url: ${page.url()})`);
 }
 
+/** Upload only within the selected editor's dialog, or its nearest upload container. */
+async function uploadImage(
+  page: Page,
+  textarea: ElementHandle<HTMLElement>,
+  imagePath: string,
+  deadline: Deadline,
+): Promise<void> {
+  const handle = await textarea.evaluateHandle((element, fileInput) => {
+    if (!element.isConnected) return null;
+    const dialog = element.closest('[role="dialog"]');
+    if (dialog) return dialog;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      if (parent.querySelector(fileInput)) return parent;
+    }
+    return null;
+  }, selectors.fileInput);
+  try {
+    const container = handle.asElement();
+    if (!container) throw new FlowFailure("uploadFailed", "composer has no upload container");
+    const input = await container.waitForSelector(selectors.fileInput, {
+      state: "attached",
+      strict: true,
+      timeout: Math.max(1, deadline.remaining(10_000)),
+    });
+    if (!input) throw new FlowFailure("uploadFailed", "composer has no file input");
+    try {
+      await input.setInputFiles(imagePath, { timeout: Math.max(1, deadline.remaining(10_000)) });
+    } finally {
+      await input.dispose();
+    }
+    const alert = page.locator(selectors.alert).filter({ visible: true }).first();
+    const finishBy = Date.now() + deadline.remaining(60_000);
+    while (Date.now() < finishBy) {
+      if (await alert.isVisible()) {
+        throw new FlowFailure(
+          "uploadFailed",
+          `image upload failed: ${(await alert.innerText()).trim()}`,
+        );
+      }
+      const attachment = await container.$(`${selectors.attachments}:visible`);
+      if (attachment) {
+        await attachment.dispose();
+        diagnose("image attached");
+        return;
+      }
+      await delay(250);
+    }
+    throw new FlowFailure("uploadFailed", "no attachment appeared");
+  } catch (error) {
+    if (error instanceof FlowFailure) throw error;
+    const detail = error instanceof Error ? error.message.split("\n")[0] : "unknown browser error";
+    throw new FlowFailure("uploadFailed", `image upload failed: ${detail}`);
+  } finally {
+    await handle.dispose();
+  }
+}
+
 /** Fills the open composer and presses Post; only X's toast counts as sent. */
 async function compose(page: Page, request: HelperRequest, deadline: Deadline): Promise<string> {
-  if (request.imagePath !== undefined) {
-    await page.locator(selectors.fileInput).setInputFiles(request.imagePath);
-    const uploaded = await firstVisible(
-      page,
-      [
-        { name: "attached", locator: page.locator(selectors.attachments) },
-        { name: "alert", locator: page.locator(selectors.alert) },
-      ],
-      deadline.remaining(60_000),
-    );
-    if (uploaded !== "attached") {
-      const text =
-        uploaded === "alert"
-          ? await page.locator(selectors.alert).first().innerText()
-          : "no attachment appeared";
-      throw new FlowFailure("uploadFailed", `image upload failed: ${text.trim()}`);
-    }
-    diagnose("image attached");
-  }
-
-  const textarea = page.locator(selectors.textarea);
+  let textarea = await reachableComposer(page, deadline.remaining(10_000));
   const text = request.text ?? "";
-  await textarea.click({ timeout: deadline.remaining(10_000) });
-  await page.keyboard.insertText(text);
-  const held = await textarea.innerText();
+  let held: string | null;
+  try {
+    if (request.imagePath !== undefined) {
+      await uploadImage(page, textarea, request.imagePath, deadline);
+      await textarea.dispose();
+      textarea = await reachableComposer(page, deadline.remaining(10_000));
+    }
+    await textarea.click({ timeout: deadline.remaining(10_000) });
+    await page.keyboard.insertText(text);
+    held = await textarea.evaluate((element) => (element.isConnected ? element.innerText : null));
+  } finally {
+    await textarea.dispose();
+  }
+  if (held === null) {
+    throw new FlowFailure("composerUnavailable", "composer was replaced; nothing was posted");
+  }
   if (!sameDraft(held, text)) {
     // Lengths only: the body stays out of diagnostics.
     throw new FlowFailure(

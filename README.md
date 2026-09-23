@@ -151,6 +151,11 @@ password sign-in even when the same account works in an ordinary browser. Passwo
 is still available by explicitly setting `XPOST_TWITTER_PASSWORD`; the helper reports X's
 login alerts and never retries a refused sign-in or hides Chromium's automation identity.
 
+Known gap in the optional password fallback: if X renders its sign-in popup after the
+background form, the helper can select the background username field and fail to continue.
+The popup's timing has not been observed, so that behavior remains unresolved. Saved-session
+checks without a password do not enter this login flow.
+
 Before it saves anything or posts, the helper checks X's `twid` cookie against
 `XPOST_TWITTER_ACCOUNT_ID`. A request for a phone number, email, code or CAPTCHA stops it.
 

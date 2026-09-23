@@ -27,6 +27,11 @@ export const scenarios = [
   "ignoresLocale",
   "restoredDraft",
   "keepsFirstLine",
+  "popupComposer",
+  "popupUploadFails",
+  "popupGlobalUploadFails",
+  "popupReplacesAfterUpload",
+  "replacesComposer",
 ] as const;
 
 export type Scenario = (typeof scenarios)[number];
@@ -89,22 +94,33 @@ const composerPage = page(`
   <div id="toast" data-testid="toast" hidden></div>
   <!--SCENARIO-->
   <script>
-    const box = document.querySelector('[data-testid="tweetTextarea_0"]');
+    let box = document.querySelector('[data-testid="tweetTextarea_0"]:not([data-fixture-background])');
     const button = document.querySelector('[data-testid="tweetButton"]');
     let media = null;
     const refresh = () => button.setAttribute("aria-disabled", box.innerText.trim() ? "false" : "true");
     box.addEventListener("input", refresh);
-    document.querySelector('[data-testid="fileInput"]').addEventListener("change", async (event) => {
+    document.querySelector('[data-testid="fileInput"]:not([data-fixture-background])').addEventListener("change", async (event) => {
       const file = event.target.files[0];
       const reply = await fetch("/media", {method: "POST", body: await file.arrayBuffer()}).then(r => r.json());
-      if (reply.error) { const a = document.getElementById("upload-alert"); a.textContent = reply.error; a.hidden = false; return; }
+      if (reply.error) {
+        const a = document.getElementById("upload-alert");
+        if (reply.globalAlert) document.body.append(a);
+        a.textContent = reply.error; a.hidden = false; return;
+      }
+      if (reply.replaceComposer) {
+        const replacement = box.cloneNode(true);
+        box.replaceWith(replacement);
+        box = replacement;
+        box.addEventListener("input", refresh);
+      }
       media = reply.id;
       document.getElementById("attachments").hidden = false;
     });
     button.onclick = async () => {
       if (button.getAttribute("aria-disabled") === "true") return;
       button.setAttribute("aria-disabled", "true");
-      const reply = await fetch("/post", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({text: box.innerText.replace(/\\n{2,}/g, "\\n\\n").trim(), media})}).then(r => r.json());
+      const draft = document.querySelector('[data-testid="tweetTextarea_0"]:not([data-fixture-background])');
+      const reply = await fetch("/post", {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify({text: draft.innerText.replace(/\\n{2,}/g, "\\n\\n").trim(), media})}).then(r => r.json());
       if (reply.hang) return;
       const t = document.getElementById("toast");
       if (reply.first) { t.textContent = reply.first; t.hidden = false; }
@@ -115,6 +131,40 @@ const composerPage = page(`
 
 // Markup a scenario adds to the composer page, after the composer and before its script.
 const composerExtras: Partial<Record<Scenario, string>> = {
+  replacesComposer: `<script>
+    const editor = document.querySelector('[data-testid="tweetTextarea_0"]');
+    editor.addEventListener("input", () => {
+      const replacement = editor.cloneNode(true);
+      replacement.textContent = "a different restored draft";
+      editor.replaceWith(replacement);
+    });
+  </script>`,
+  popupComposer: `<script>
+    const editor = document.querySelector('[data-testid="tweetTextarea_0"]');
+    const background = editor.cloneNode(true);
+    background.textContent = "private background draft";
+    editor.before(background);
+    const popup = document.createElement("div");
+    popup.setAttribute("role", "dialog");
+    popup.style.cssText = "position:fixed;inset:0;background:white;z-index:10;padding:40px";
+    editor.before(popup);
+    popup.append(editor);
+    popup.append(document.querySelector('[data-testid="tweetButton"]'));
+    const upload = document.querySelector('[data-testid="fileInput"]');
+    const backgroundUpload = upload.cloneNode(true);
+    backgroundUpload.setAttribute("data-fixture-background", "true");
+    popup.before(backgroundUpload);
+    popup.append(upload);
+    const attachment = document.getElementById("attachments");
+    const backgroundAttachment = attachment.cloneNode(true);
+    backgroundAttachment.removeAttribute("id");
+    backgroundAttachment.hidden = false;
+    attachment.before(backgroundAttachment);
+    popup.append(attachment);
+    popup.append(document.getElementById("upload-alert"));
+    // The existing fixture script must drive the popup, not the deliberately earlier copy.
+    background.setAttribute("data-fixture-background", "true");
+  </script>`,
   hiddenStaleToast: '<div data-testid="toast" hidden>Your post was sent.</div>',
   restoredDraft: `<script>
     document.querySelector('[data-testid="tweetTextarea_0"]').innerText = "an unsent draft";
@@ -232,7 +282,11 @@ export class FakeX {
             : "en";
         return html(
           composerPage
-            .replace("<!--SCENARIO-->", composerExtras[this.scenario] ?? "")
+            .replace(
+              "<!--SCENARIO-->",
+              composerExtras[this.scenario.startsWith("popup") ? "popupComposer" : this.scenario] ??
+                "",
+            )
             .replace('<html lang="en">', `<html lang="${this.composerLanguage}">`),
         );
       case "POST /login/username": {
@@ -274,8 +328,16 @@ export class FakeX {
       }
       case "POST /media":
         await text(request);
-        if (this.scenario === "uploadFails") return json({ error: "Media upload failed." });
-        return json({ id: "m1" });
+        if (
+          this.scenario === "uploadFails" ||
+          this.scenario === "popupUploadFails" ||
+          this.scenario === "popupGlobalUploadFails"
+        )
+          return json({
+            error: "Media upload failed.",
+            globalAlert: this.scenario === "popupGlobalUploadFails",
+          });
+        return json({ id: "m1", replaceComposer: this.scenario === "popupReplacesAfterUpload" });
       case "POST /post": {
         const body: unknown = JSON.parse(await text(request));
         const record = typeof body === "object" && body !== null ? body : {};

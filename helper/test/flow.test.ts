@@ -41,6 +41,47 @@ test.each([true, false])("context recovery with saved state present=%s", async (
   expect(browser.close).toHaveBeenCalledOnce();
 });
 
+test("composer errors retain the first line without leaking the page's draft", async () => {
+  const page = {
+    goto: vi.fn(),
+    on: vi.fn(),
+    url: () => "https://x.com/compose/post",
+    locator: (selector: string) => {
+      const locator = {
+        filter: () => locator,
+        first: () => locator,
+        isVisible: async () => selector.includes("tweetTextarea_0"),
+      };
+      return locator;
+    },
+    waitForFunction: vi
+      .fn()
+      .mockRejectedValue(
+        new Error("page.waitForFunction: frame detached\nCall log: private draft body"),
+      ),
+  };
+  browser.newContext.mockReset().mockResolvedValue({
+    newPage: async () => page,
+    cookies: async () => [{ name: "twid", value: "u%3D123" }],
+  });
+  browser.close.mockReset();
+  const result = await run({
+    op: "check",
+    baseURL: "https://x.com",
+    username: "fixture",
+    password: "fixture-password",
+    accountID: "123",
+    timeoutMs: 1_000,
+  });
+  expect(result).toMatchObject({
+    outcome: "failed",
+    reason: "composerUnavailable",
+    detail:
+      "composer did not open: page.waitForFunction: frame detached (url: https://x.com/compose/post)",
+  });
+  expect(JSON.stringify(result)).not.toContain("private draft body");
+});
+
 test.each([
   ["the same text", "hi\n\nhttps://example.com", "hi\n\nhttps://example.com"],
   [
