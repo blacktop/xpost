@@ -44,4 +44,14 @@ import Testing
       try XPost.parseAsRoot(["--targets", "all", "--dry-run", "-m", "hi"])
     }
   }
+
+  #if os(macOS)
+    @Test func exportSessionRequiresAnOutputAndNeverParsesAsAPost() throws {
+      let command = try #require(
+        try XPost.parseAsRoot(["twitter", "export-session", "--output", "/tmp/state.json"])
+          as? Twitter.ExportSession)
+      #expect(command.output == "/tmp/state.json")
+      #expect(throws: (any Error).self) { try XPost.parseAsRoot(["twitter", "export-session"]) }
+    }
+  #endif
 }

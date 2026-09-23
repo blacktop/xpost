@@ -62,6 +62,7 @@ let signInStepJS = """
 /// WebAuthn ceremony, which the bridge answers after Touch ID.
 @MainActor
 func signIn(_ browser: Browser, user: String, timeout: Double) async throws {
+  guard let bridge = browser.bridge else { throw Failure("passkey sign-in is not configured") }
   let log = browser.log
   try browser.load(loginURL)
   let started = Date()
@@ -81,9 +82,9 @@ func signIn(_ browser: Browser, user: String, timeout: Double) async throws {
       log.note(
         "still signing in after \(Int(elapsed))s: url=\(url) "
           + "loading=\(browser.webView.isLoading) "
-          + "active webauthn requests=\(browser.bridge.activeRequestCount)")
+          + "active webauthn requests=\(bridge.activeRequestCount)")
     }
-    guard !browser.bridge.isBusy else { continue }
+    guard !bridge.isBusy else { continue }
 
     let done = presses.filter { $0.value >= maxPresses }.map(\.key)
     let arguments: [String: Any] = ["user": user, "done": done]
@@ -97,7 +98,7 @@ func signIn(_ browser: Browser, user: String, timeout: Double) async throws {
     }
     if step["enteredUser"] as? Bool == true { log.note("entered username") }
     // X may have started a ceremony while the step script ran.
-    guard !browser.bridge.isBusy else { continue }
+    guard !bridge.isBusy else { continue }
     if let target = step["target"] as? [String: Any], let pressed = target["label"] as? String,
       let x = target["x"] as? Double, let y = target["y"] as? Double
     {

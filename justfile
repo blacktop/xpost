@@ -45,6 +45,10 @@ twitter-probe:
 twitter-enroll:
     swift run xpost twitter enroll
 
+# Sign in manually and export a session for Linux (macOS, no post).
+twitter-export-session output:
+    swift run xpost twitter export-session --output "$1"
+
 # Forget the saved X session, keeping the passkey (macOS).
 twitter-logout:
     swift run xpost twitter logout

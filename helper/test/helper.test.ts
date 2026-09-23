@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "vitest";
 
 import type { HelperResult } from "../src/protocol.ts";
-import { FakeX } from "./fixtures/server.ts";
+import { FakeX, type Scenario } from "./fixtures/server.ts";
 
 const helperScript = new URL("../dist/helper.js", import.meta.url).pathname;
 
@@ -159,16 +159,63 @@ describe("password login", () => {
     });
   });
 
-  test("presents itself as desktop Chrome, not HeadlessChrome", async () => {
+  test("keeps Chromium's native headless user agent", async () => {
     const run = await runHelper(request({ op: "check" }));
 
     expect(run.result).toMatchObject({ outcome: "checked" });
     expect(x.agents.length).toBeGreaterThan(0);
-    for (const { userAgent, clientHints } of x.agents) {
-      expect(userAgent).toMatch(/ Chrome\/\d+\.0\.0\.0 Safari\/537\.36$/);
-      expect(`${userAgent} ${clientHints}`).not.toContain("Headless");
+    for (const { userAgent } of x.agents) {
+      expect(userAgent).toContain("HeadlessChrome/");
     }
   });
+
+  test("still accepts the legacy Next and Log in flow", async () => {
+    x.reset("legacyLogin");
+    const run = await runHelper(request({ op: "check" }));
+    expect(run.result).toMatchObject({ outcome: "checked", sessionSource: "password" });
+    expect(x.posts).toEqual([]);
+  });
+
+  test.each(["limitedAtUsername", "limitedOnArrival"] satisfies Scenario[])(
+    "%s reports X's alert without waiting for the composer",
+    async (scenario) => {
+      x.reset(scenario);
+      const started = Date.now();
+      const run = await runHelper(request({ op: "check", timeoutMs: 10_000 }));
+      expect(run.result).toMatchObject({
+        outcome: "failed",
+        reason: "loginFailed",
+        detail: expect.stringContaining("temporarily limited"),
+      });
+      expect(Date.now() - started).toBeLessThan(10_000);
+      expect(x.posts).toEqual([]);
+    },
+  );
+
+  test.each(["expired", "challenged"])(
+    "%s saved state without a password never starts login",
+    async (state) => {
+      const stateFile = join(workdir, "state.json");
+      const savedCookies =
+        state === "challenged"
+          ? [
+              stateCookie("auth_token", "fixture-token", "127.0.0.1", "/", true),
+              stateCookie("twid", `u%3D${x.accountID}`, "127.0.0.1"),
+            ]
+          : [];
+      await writeFile(stateFile, JSON.stringify({ cookies: savedCookies, origins: [] }));
+      if (state === "challenged") x.reset("stateChallenge");
+      const run = await runHelper(
+        request({ op: "check", stateFile, password: undefined, timeoutMs: 10_000 }),
+      );
+      expect(run.result).toMatchObject({
+        outcome: "failed",
+        reason: state === "challenged" ? "challenge" : "notSignedIn",
+      });
+      expect(x.loginAttempts).toBe(0);
+      expect(x.posts).toEqual([]);
+    },
+  );
 
   test("without a session or a password it stops before typing anything", async () => {
     const run = await runHelper(request({ password: undefined }));

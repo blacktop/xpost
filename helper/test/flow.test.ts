@@ -8,12 +8,6 @@ import { run, sameDraft } from "../src/flow.ts";
 const browser = vi.hoisted(() => ({
   newContext: vi.fn(),
   close: vi.fn(),
-  newBrowserCDPSession: async () => ({
-    send: async () => ({
-      userAgent: "Mozilla/5.0 (X11; Linux x86_64) HeadlessChrome/153.0.0.0 Safari/537.36",
-    }),
-    detach: async () => {},
-  }),
 }));
 vi.mock("playwright", () => ({ chromium: { launch: async () => browser } }));
 
@@ -39,14 +33,10 @@ test.each([true, false])("context recovery with saved state present=%s", async (
     }),
   ).rejects.toBe(present ? browserError : loadError);
 
-  const userAgent = "Mozilla/5.0 (X11; Linux x86_64) Chrome/153.0.0.0 Safari/537.36";
   expect(browser.newContext.mock.calls).toEqual(
     present
-      ? [
-          [{ locale: "en-US", userAgent, storageState: stateFile }],
-          [{ locale: "en-US", userAgent }],
-        ]
-      : [[{ locale: "en-US", userAgent }]],
+      ? [[{ locale: "en-US", storageState: stateFile }], [{ locale: "en-US" }]]
+      : [[{ locale: "en-US" }]],
   );
   expect(browser.close).toHaveBeenCalledOnce();
 });

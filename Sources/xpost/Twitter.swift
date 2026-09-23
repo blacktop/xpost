@@ -12,11 +12,30 @@ import XPostCore
         Posting to X signs in with a passkey that xpost keeps in this Mac's Secure Enclave and \
         unlocks with Touch ID. Enroll it once, then set XPOST_TWITTER_USER to your X username.
         """,
-      subcommands: [Enroll.self, Logout.self, Probe.self]
+      subcommands: [Enroll.self, Logout.self, Probe.self, ExportSession.self]
     )
   }
 
   extension Twitter {
+    struct ExportSession: ParsableCommand {
+      static let configuration = CommandConfiguration(
+        abstract: "Sign in manually and export a session for the Linux helper (no post)")
+
+      @Option(help: "New Playwright session file to write with owner-only permissions")
+      var output: String
+
+      @OptionGroup var verbosity: Verbosity
+
+      func run() {
+        let accountID = ProcessInfo.processInfo.environment.setting("XPOST_TWITTER_ACCOUNT_ID")
+        let destination = URL(fileURLWithPath: output)
+        let log = verbosity.log("twitter")
+        runToExit(.appKit(showsWindow: true)) {
+          try await TwitterCommands.exportSession(accountID: accountID, to: destination, log: log)
+        }
+      }
+    }
+
     struct Enroll: ParsableCommand {
       static let configuration = CommandConfiguration(
         abstract: "Create the passkey for X in a browser window (one-time setup)"

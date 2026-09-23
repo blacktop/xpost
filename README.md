@@ -140,29 +140,61 @@ Then set these in the environment xpost runs in:
 
 ```sh
 XPOST_TWITTER_HELPER=/path/to/xpost/helper   # the directory with dist/helper.js
-XPOST_TWITTER_USER=dedicated_account         # typed into the login form
+XPOST_TWITTER_USER=dedicated_account
 XPOST_TWITTER_ACCOUNT_ID=442174011           # X's numeric id of that account; nothing else may post
-XPOST_TWITTER_PASSWORD=…                     # or a saved session:
 XPOST_TWITTER_STATE_FILE=/secure/x-session.json
 ```
 
-Use a dedicated account. The helper only signs in with the password when there's no saved
-session or the saved one no longer works. Before it saves anything or posts, it checks X's own
-`twid` cookie to confirm the signed-in account is `XPOST_TWITTER_ACCOUNT_ID`. If X asks for a
-phone number, email, code or CAPTCHA (a "challenge"), the helper stops. It never tries to get
-past one.
+Use a dedicated account. With no `XPOST_TWITTER_PASSWORD` configured, the helper only uses the
+saved session: missing, unreadable or rejected state stops the run. X can reject automated
+password sign-in even when the same account works in an ordinary browser. Password fallback
+is still available by explicitly setting `XPOST_TWITTER_PASSWORD`; the helper reports X's
+login alerts and never retries a refused sign-in or hides Chromium's automation identity.
 
-The state file is a credential because it holds the session cookies. xpost writes it with
-mode 0600 after a verified password login and reads it on later runs. Keep it out of build
-caches, logs and uploaded artifacts, and delete it to sign out.
+Before it saves anything or posts, the helper checks X's `twid` cookie against
+`XPOST_TWITTER_ACCOUNT_ID`. A request for a phone number, email, code or CAPTCHA stops it.
+
+### Export a session from macOS
+
+Set `XPOST_TWITTER_ACCOUNT_ID` to the numeric id of the account you want to export, then run:
+
+```fish
+just twitter-export-session "$HOME/.config/xpost/x-session.json"
+```
+
+This opens a fresh visible WebKit window for manual sign-in. Use a password or a passkey
+offered by WebKit; passkey availability can differ from your regular browser. The command
+doesn't load or change xpost's enrolled passkey or saved Keychain session, so it can export a
+different account such as `ipsw_diffs`. It verifies the account and opens the composer without
+posting, then exports the applicable X cookies in Playwright storage-state format. It writes
+the new file with mode 0600 from the outset and refuses to overwrite an existing path.
+
+Copy that file privately to Linux and set `XPOST_TWITTER_STATE_FILE` to its path. WebKit login
+and reuse from Chromium or a hosted runner are separate checks: the export doesn't prove X
+will accept the session from another browser or IP. A rejected session needs a fresh export.
+
+The state file is a credential because it holds session cookies. Keep it out of build caches,
+logs and uploaded artifacts. Deleting it removes the local copy; revoke the session in X's
+settings to invalidate any other copies. The helper can also save state with mode 0600 after
+a verified password login.
 
 `xpost twitter check` signs in, verifies the account and opens the composer without posting.
-Use it to find out whether X accepts a login from a given machine. The two workflows in
-`.github/workflows` split the work: `swift.yml` only ever talks to a fixture server, while
+Use it on Linux to check whether X accepts the session from that machine. In `.github/workflows`,
+`swift.yml` only ever talks to a fixture server, while
 `x-live-check.yml` runs by hand against the real X and never posts. Its account lives in the
 secrets of a GitHub environment named `x-live`, so give that environment required reviewers.
-The live check is also the only way to learn whether X keeps accepting unattended logins from
-a hosted runner. The fixtures can't tell you that.
+The live check uses `XPOST_TWITTER_USER`, `XPOST_TWITTER_ACCOUNT_ID`, and
+`XPOST_TWITTER_STATE_B64` from that environment. It no longer uses the password secret. From
+macOS, upload an exported session without printing its contents:
+
+```fish
+base64 -i "$HOME/.config/xpost/x-session.json" | gh secret set XPOST_TWITTER_STATE_B64 --env x-live
+```
+
+The workflow decodes it to a private temporary file, runs `twitter check` with password
+fallback disabled, and deletes the file on exit. Run **X live check** manually after updating
+the secret. Its result establishes whether that session works on the runner at that time;
+fixtures cannot establish that, and a successful check doesn't guarantee later acceptance.
 
 ## Development
 

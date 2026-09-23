@@ -1,8 +1,6 @@
-# A feasibility check against the real X, run only by hand: signs in with the dedicated
-# account, verifies it is the expected account, opens the composer and posts nothing.
-# The session state is never saved, cached or uploaded from this workflow. The account
-# secrets (XPOST_TWITTER_USER, XPOST_TWITTER_PASSWORD, XPOST_TWITTER_ACCOUNT_ID) belong to the
-# "x-live" environment.
+# A manual no-post check of an exported session against real X. No password fallback.
+# The session secret is decoded into a private temporary file and deleted on exit;
+# it is never cached or uploaded as an artifact. Secrets belong to the "x-live" environment.
 name: X live check
 
 on:
@@ -16,7 +14,7 @@ concurrency:
 
 jobs:
   check:
-    name: Sign in and open the composer (no post)
+    name: Verify exported session and open the composer (no post)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     # The account lives in this environment's secrets; give it required reviewers so a run
@@ -47,7 +45,18 @@ jobs:
         env:
           XPOST_TWITTER_HELPER: ${{ github.workspace }}/helper
           XPOST_TWITTER_USER: ${{ secrets.XPOST_TWITTER_USER }}
-          XPOST_TWITTER_PASSWORD: ${{ secrets.XPOST_TWITTER_PASSWORD }}
+          XPOST_TWITTER_STATE_B64: ${{ secrets.XPOST_TWITTER_STATE_B64 }}
           XPOST_TWITTER_ACCOUNT_ID: ${{ secrets.XPOST_TWITTER_ACCOUNT_ID }}
         run: |
-          "$(swift build -c release --show-bin-path)/xpost" twitter check -V
+          set -euo pipefail
+          umask 077
+          session_dir=$(mktemp -d)
+          trap 'rm -rf "$session_dir"' EXIT
+          if [ -z "$XPOST_TWITTER_STATE_B64" ]; then
+            echo "Set the x-live secret XPOST_TWITTER_STATE_B64 from a fresh exported session."
+            exit 1
+          fi
+          printf '%s' "$XPOST_TWITTER_STATE_B64" | base64 --decode > "$session_dir/state.json"
+          unset XPOST_TWITTER_STATE_B64
+          export XPOST_TWITTER_STATE_FILE="$session_dir/state.json"
+          env -u XPOST_TWITTER_PASSWORD "$(swift build -c release --show-bin-path)/xpost" twitter check -V

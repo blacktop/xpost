@@ -7,6 +7,10 @@ import { text } from "node:stream/consumers";
 
 export const scenarios = [
   "normal",
+  "legacyLogin",
+  "limitedAtUsername",
+  "limitedOnArrival",
+  "stateChallenge",
   "wrongPassword",
   "challengeAfterUsername",
   "challengeAfterPassword",
@@ -35,28 +39,33 @@ export interface RecordedPost {
 const page = (body: string): string =>
   `<!doctype html><html lang="en"><head><meta charset="utf-8"><title>X</title></head><body>${body}</body></html>`;
 
-const loginPage = page(`
+const loginPage = (legacy: boolean): string =>
+  page(`
+  ${legacy ? "" : '<input name="username_or_email" autocomplete="username webauthn"><button>Continue</button><div role="dialog">'}
   <div id="username-step">
-    <input autocomplete="username" name="text" type="text">
-    <button type="button" id="next">Next</button>
+    <input autocomplete="${legacy ? "username" : "username webauthn"}" name="${legacy ? "text" : "username_or_email"}" type="text">
+    <button type="button" id="next">${legacy ? "Next" : "Continue"}</button>
   </div>
   <div id="password-step" hidden>
     <input name="password" type="password">
-    <button type="button" data-testid="LoginForm_Login_Button">Log in</button>
+    <button type="button" data-testid="LoginForm_Login_Button">${legacy ? "Log in" : "Continue"}</button>
   </div>
   <div id="challenge" hidden>
     <p>Enter your phone number or email address</p>
     <input data-testid="ocfEnterTextTextInput" type="text">
   </div>
   <div id="alert" role="alert" hidden></div>
+  ${legacy ? "" : "</div>"}
   <script>
     const post = (path, body) => fetch(path, {method: "POST", headers: {"content-type": "application/json"}, body: JSON.stringify(body)}).then(r => r.json());
     document.getElementById("next").onclick = async () => {
-      const username = document.querySelector('input[autocomplete="username"]').value;
+      const username = document.querySelector('#username-step input').value;
       const reply = await post("/login/username", {username});
+      if (reply.error) { const a = document.getElementById("alert"); a.textContent = reply.error; a.hidden = false; return; }
       if (reply.challenge) { document.getElementById("challenge").hidden = false; return; }
       document.getElementById("username-step").hidden = true;
       document.getElementById("password-step").hidden = false;
+      if (!${legacy}) history.replaceState(null, "", "/i/jf/onboarding/web#/s/password");
       if (reply.disablePassword) document.querySelector('input[name="password"]').disabled = true;
       if (reply.checkboxPassword) document.querySelector('input[name="password"]').type = "checkbox";
     };
@@ -185,15 +194,31 @@ export class FakeX {
 
     switch (`${request.method} ${url.pathname}`) {
       case "GET /i/flow/login":
-        return html(loginPage);
+      case "GET /i/jf/onboarding/web":
+        if (this.scenario === "limitedOnArrival") {
+          return html(
+            page(
+              '<div role="alert" hidden>stale</div><div role="alert">Sign-ins temporarily limited. Try again later.</div>',
+            ),
+          );
+        }
+        return html(loginPage(this.scenario === "legacyLogin"));
       case "GET /account/access":
         return html(page("<p>Verify you are human</p>"));
       case "GET /home":
         return html(homePage);
       case "GET /compose/post":
+        if (signedIn && this.scenario === "stateChallenge") {
+          response.writeHead(302, { location: "/account/access" });
+          response.end();
+          return;
+        }
         if (!signedIn) {
           response.writeHead(302, {
-            location: "/i/flow/login?redirect_after_login=%2Fcompose%2Fpost",
+            location:
+              this.scenario === "legacyLogin"
+                ? "/i/flow/login?redirect_after_login=%2Fcompose%2Fpost"
+                : "/i/jf/onboarding/web#/s/username",
           });
           response.end();
           return;
@@ -211,8 +236,18 @@ export class FakeX {
             .replace('<html lang="en">', `<html lang="${this.composerLanguage}">`),
         );
       case "POST /login/username": {
-        await text(request);
+        const body: unknown = JSON.parse(await text(request));
         this.loginAttempts += 1;
+        if (this.scenario === "limitedAtUsername")
+          return json({ error: "Sign-ins temporarily limited. Try again later." });
+        if (
+          typeof body !== "object" ||
+          body === null ||
+          !("username" in body) ||
+          body.username !== this.username
+        ) {
+          return json({ error: "Wrong username!" });
+        }
         return json({
           challenge: this.scenario === "challengeAfterUsername",
           disablePassword: this.scenario === "passwordFieldDisabled",

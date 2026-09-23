@@ -11,11 +11,10 @@ import { type Browser, type BrowserContext, type Locator, type Page, chromium } 
 import type { FailureReason, HelperRequest, HelperResult, SessionSource } from "./protocol.ts";
 
 const selectors = {
-  usernameInput: 'input[autocomplete="username"]',
-  passwordInput: 'input[name="password"]',
-  loginButton: '[data-testid="LoginForm_Login_Button"]',
+  usernameInput: 'input[autocomplete~="username"]:visible, input[name="username_or_email"]:visible',
+  passwordInput: 'input[name="password"]:visible, input[type="password"]:visible',
   /** X asks for a phone or email, a code, or a password reset here: never automated. */
-  challengeInput: '[data-testid="ocfEnterTextTextInput"]',
+  challengeInput: '[data-testid="ocfEnterTextTextInput"], input[autocomplete="one-time-code"]',
   alert: '[role="alert"]',
   textarea: '[data-testid="tweetTextarea_0"]',
   fileInput: 'input[data-testid="fileInput"]',
@@ -27,7 +26,7 @@ const selectors = {
 /** The toast X shows for a sent post, as observed on 2026-09-21. */
 const sentNotice = "your post was sent";
 
-const loginPaths = ["/i/flow/", "/login"];
+const loginPaths = ["/i/flow/", "/i/jf/", "/login"];
 const challengePaths = ["/account/access", "/i/account/"];
 
 export class FlowFailure extends Error {
@@ -103,7 +102,14 @@ async function firstVisible(
   while (Date.now() < deadline) {
     if (challengePaths.some((prefix) => pathOf(page).startsWith(prefix))) return "challenge";
     for (const candidate of candidates) {
-      if (await candidate.locator.first().isVisible()) return candidate.name;
+      if (await candidate.locator.filter({ visible: true }).first().isVisible())
+        return candidate.name;
+    }
+    if (
+      candidates.some(({ name }) => name === "login") &&
+      loginPaths.some((prefix) => pathOf(page).startsWith(prefix))
+    ) {
+      return "login";
     }
     await delay(250);
   }
@@ -112,13 +118,20 @@ async function firstVisible(
 
 export async function run(request: HelperRequest): Promise<HelperResult> {
   redact(request.password);
+  if (
+    request.password === undefined &&
+    (request.stateFile === undefined || !existsSync(request.stateFile))
+  ) {
+    return {
+      outcome: "failed",
+      reason: "notSignedIn",
+      detail: "no saved session is available; export a session with xpost twitter export-session",
+    };
+  }
   const deadline = new Deadline(request.timeoutMs);
   let browser: Browser | undefined;
   try {
-    // The full Chromium build: the headless shell names itself HeadlessChrome in the client
-    // hints too, which a user agent override cannot change.
-    browser = await chromium.launch({ channel: "chromium" });
-    const userAgent = await desktopUserAgent(browser);
+    browser = await chromium.launch();
     const stateFile =
       request.stateFile !== undefined && existsSync(request.stateFile)
         ? request.stateFile
@@ -127,13 +140,20 @@ export async function run(request: HelperRequest): Promise<HelperResult> {
     try {
       context = await browser.newContext({
         locale: "en-US",
-        userAgent,
         ...(stateFile !== undefined ? { storageState: stateFile } : {}),
       });
     } catch (error) {
       if (stateFile === undefined) throw error;
+      if (request.password === undefined) {
+        return {
+          outcome: "failed",
+          reason: "notSignedIn",
+          detail:
+            "saved session could not load; export a new session with xpost twitter export-session",
+        };
+      }
       diagnose("browser context creation failed; retrying without saved session state");
-      context = await browser.newContext({ locale: "en-US", userAgent });
+      context = await browser.newContext({ locale: "en-US" });
     }
     const page = await context.newPage();
     page.on("dialog", (dialog) => void dialog.dismiss());
@@ -145,14 +165,6 @@ export async function run(request: HelperRequest): Promise<HelperResult> {
   } finally {
     await browser?.close();
   }
-}
-
-/** The browser's own user agent, as desktop Chrome sends it: without the headless marker. */
-async function desktopUserAgent(browser: Browser): Promise<string> {
-  const session = await browser.newBrowserCDPSession();
-  const { userAgent } = await session.send("Browser.getVersion");
-  await session.detach();
-  return userAgent.replace("HeadlessChrome/", "Chrome/");
 }
 
 async function drive(
@@ -170,17 +182,18 @@ async function drive(
   const landed = await firstVisible(
     page,
     [
+      { name: "alert", locator: page.locator(selectors.alert) },
       { name: "composer", locator: page.locator(selectors.textarea) },
       { name: "login", locator: page.locator(selectors.usernameInput) },
     ],
     deadline.remaining(30_000),
   );
-  if (landed === "challenge") await stopOnChallenge(page, landed);
+  if (landed === "challenge" || landed === "alert") await stopOnChallenge(page, landed);
   if (landed === "login" || loginPaths.some((prefix) => pathOf(page).startsWith(prefix))) {
     if (request.password === undefined) {
       throw new FlowFailure(
         "notSignedIn",
-        "the saved session does not sign in and no password was given",
+        "saved session was rejected or expired; export a new session with xpost twitter export-session",
       );
     }
     sessionSource = "password";
@@ -246,32 +259,53 @@ async function saveState(context: BrowserContext, stateFile: string): Promise<vo
 
 /** One pass through X's login screens. Anything X asks beyond username and password stops here. */
 async function login(page: Page, request: HelperRequest, deadline: Deadline): Promise<void> {
-  const username = page.locator(selectors.usernameInput);
-  await username.waitFor({ state: "visible", timeout: deadline.remaining(30_000) });
+  // The new flow keeps the old username form behind its modal. Only operate in the modal.
+  const dialogs = page.locator('[role="dialog"]:visible');
+  const surface = (await dialogs.count()) > 0 ? dialogs.last() : page.locator("body");
+  const username = surface.locator(selectors.usernameInput).first();
+  const initial = await firstVisible(
+    page,
+    [
+      { name: "alert", locator: surface.locator(selectors.alert) },
+      { name: "challenge", locator: surface.locator(selectors.challengeInput) },
+      { name: "username", locator: username },
+    ],
+    deadline.remaining(30_000),
+  );
+  if (initial !== "username") await stopOnChallenge(page, initial);
   await username.fill(request.username);
-  await page.getByRole("button", { name: "Next" }).click({ timeout: deadline.remaining(10_000) });
+  await surface
+    .getByRole("button", { name: /^(next|continue)$/i })
+    .filter({ visible: true })
+    .click({ timeout: deadline.remaining(10_000) });
 
   const afterUsername = await firstVisible(
     page,
     [
-      { name: "password", locator: page.locator(selectors.passwordInput) },
-      { name: "challenge", locator: page.locator(selectors.challengeInput) },
-      { name: "alert", locator: page.locator(selectors.alert) },
+      { name: "alert", locator: surface.locator(selectors.alert) },
+      { name: "challenge", locator: surface.locator(selectors.challengeInput) },
+      { name: "password", locator: surface.locator(selectors.passwordInput) },
     ],
     deadline.remaining(30_000),
   );
   if (afterUsername !== "password") await stopOnChallenge(page, afterUsername);
 
   try {
-    await page.locator(selectors.passwordInput).fill(request.password ?? "", {
-      timeout: deadline.remaining(10_000),
-    });
+    await surface
+      .locator(selectors.passwordInput)
+      .first()
+      .fill(request.password ?? "", {
+        timeout: deadline.remaining(10_000),
+      });
   } catch {
     // Playwright includes the fill argument in its call log, with arbitrary escaping.
     // Never forward that error, even after redaction.
     throw new FlowFailure("loginFailed", "password field cannot be filled");
   }
-  await page.locator(selectors.loginButton).click({ timeout: deadline.remaining(10_000) });
+  await surface
+    .getByRole("button", { name: /^(log in|continue)$/i })
+    .filter({ visible: true })
+    .click({ timeout: deadline.remaining(10_000) });
 
   const afterPassword = await firstVisible(
     page,
@@ -296,7 +330,9 @@ async function stopOnChallenge(page: Page, seen: string | undefined): Promise<ne
     );
   }
   if (seen === "alert") {
-    const text = (await page.locator(selectors.alert).first().innerText()).trim();
+    const text = (
+      await page.locator(selectors.alert).filter({ visible: true }).first().innerText()
+    ).trim();
     throw new FlowFailure("loginFailed", `X rejected the sign-in: ${text}`);
   }
   throw new FlowFailure("loginFailed", `sign-in did not finish (url: ${page.url()})`);

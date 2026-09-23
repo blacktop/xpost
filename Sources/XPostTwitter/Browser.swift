@@ -28,19 +28,19 @@ func safariVersion() -> String {
 final class Browser: NSObject, WKUIDelegate {
   let webView: WKWebView
   let window: NSWindow
-  let bridge: WebAuthnBridge
+  let bridge: WebAuthnBridge?
   let log: RunLog
   /// Files to hand to the page the next time it opens a file chooser.
   var pendingUploads: [URL] = []
 
-  init(authenticator: Authenticator, log: RunLog) {
+  init(authenticator: Authenticator?, log: RunLog) {
     self.log = log
-    bridge = WebAuthnBridge(authenticator: authenticator, log: log)
+    bridge = authenticator.map { WebAuthnBridge(authenticator: $0, log: log) }
     let config = WKWebViewConfiguration()
     config.websiteDataStore = .nonPersistent()
     // WKWebView omits the Version/Safari tokens that real Safari sends.
     config.applicationNameForUserAgent = "Version/\(safariVersion()) Safari/605.1.15"
-    bridge.install(on: config.userContentController)
+    bridge?.install(on: config.userContentController)
 
     let frame = NSRect(x: 0, y: 0, width: 1100, height: 850)
     webView = WKWebView(frame: frame, configuration: config)

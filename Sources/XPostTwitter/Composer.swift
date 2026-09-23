@@ -131,7 +131,7 @@ let visibleNoticesJS = """
   """
 
 /// Where X sends a browser that has to sign in or prove something first.
-let authFlowPaths = ["/i/flow/", "/login", "/account/access", "/i/account/"]
+let authFlowPaths = ["/i/flow/", "/i/jf/", "/login", "/account/access", "/i/account/"]
 
 func postOutcome(path: String, notices: String) -> PostOutcome {
   if notices.lowercased().contains(sentNotice) {
