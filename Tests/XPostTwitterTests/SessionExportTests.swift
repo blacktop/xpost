@@ -5,6 +5,10 @@ import XPostCore
 
 @testable import XPostTwitter
 
+private final class CookieWithoutSameSitePolicy: HTTPCookie, @unchecked Sendable {
+  override var sameSitePolicy: HTTPCookieStringPolicy? { nil }
+}
+
 @Suite struct SessionExportTests {
   private func cookie(
     _ name: String, _ value: String, domain: String = ".x.com", path: String = "/",
@@ -21,6 +25,30 @@ import XPostCore
 
   private func signedInCookies() throws -> [HTTPCookie] {
     try [cookie("auth_token", "fixture-token"), cookie("twid", "u%3D123")]
+  }
+
+  @Test func exportsMissingSameSitePolicyAsNone() throws {
+    let cookie = try #require(
+      CookieWithoutSameSitePolicy(properties: [
+        .name: "ct0", .value: "fixture-csrf", .domain: ".x.com", .path: "/", .secure: "TRUE",
+      ]))
+    let session = try ExportedSession(cookies: signedInCookies() + [cookie], accountID: "123")
+    let decoded = try JSONDecoder().decode(
+      ExportedSession.self, from: JSONEncoder().encode(session))
+    #expect(decoded.cookies.last?.sameSite == "None")
+  }
+
+  @Test func exportsMissingSameSitePolicyAsLaxForNonSecureCookies() throws {
+    let cookie = try #require(
+      CookieWithoutSameSitePolicy(properties: [
+        .name: "preference", .value: "fixture", .domain: ".x.com", .path: "/",
+      ]))
+    let session = try ExportedSession(cookies: signedInCookies() + [cookie], accountID: "123")
+    let decoded = try JSONDecoder().decode(
+      ExportedSession.self, from: JSONEncoder().encode(session))
+    let exported = try #require(decoded.cookies.last)
+    #expect(!exported.secure)
+    #expect(exported.sameSite == "Lax")
   }
 
   @Test func exportsOnlyApplicableCookiesInPlaywrightFormat() throws {

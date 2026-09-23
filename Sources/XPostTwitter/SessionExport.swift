@@ -25,6 +25,8 @@ struct ExportedSession: Codable {
       switch cookie.sameSitePolicy?.rawValue.lowercased() {
       case "strict": sameSite = "Strict"
       case "none": sameSite = "None"
+      // nil can mean None or an absent attribute; Chromium requires Secure for None.
+      case nil: sameSite = cookie.isSecure ? "None" : "Lax"
       default: sameSite = "Lax"
       }
     }
