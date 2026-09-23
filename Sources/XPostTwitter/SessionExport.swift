@@ -52,7 +52,10 @@ struct ExportedSession: Codable {
       at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
     var template = Array(directory.appending(path: ".xpost-session-XXXXXX").path.utf8CString)
     let descriptor = mkstemp(&template)
-    guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+    guard descriptor >= 0 else {
+      let detail = String(cString: strerror(errno))
+      throw Failure("could not create a temporary session file in \(directory.path): \(detail)")
+    }
     let temporary = URL(
       fileURLWithPath: String(
         decoding: template.dropLast().map { UInt8(bitPattern: $0) }, as: UTF8.self))
@@ -63,8 +66,10 @@ struct ExportedSession: Codable {
     try file.synchronize()
     // A hard link publishes the private sibling atomically and fails if the output exists.
     guard link(temporary.path, destination.path) == 0 else {
-      if errno == EEXIST { throw Failure("output already exists; choose a new session file") }
-      throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+      let code = errno
+      if code == EEXIST { throw Failure("output already exists; choose a new session file") }
+      let detail = String(cString: strerror(code))
+      throw Failure("could not write the session to \(destination.path): \(detail)")
     }
   }
 }

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 import XPostCore
@@ -95,5 +96,39 @@ import XPostCore
     #expect(throws: Failure.self) { try session.write(to: output) }
     #expect(!FileManager.default.fileExists(atPath: target.path))
     #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path) == ["state.json"])
+  }
+
+  @Test(.enabled(if: geteuid() != 0, "root can write read-only directories"))
+  func temporaryFileFailureIncludesDirectoryAndCause() throws {
+    let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer {
+      try? FileManager.default.setAttributes(
+        [.posixPermissions: 0o700], ofItemAtPath: directory.path)
+      try? FileManager.default.removeItem(at: directory)
+    }
+    try FileManager.default.setAttributes([.posixPermissions: 0o500], ofItemAtPath: directory.path)
+    let session = try ExportedSession(cookies: signedInCookies(), accountID: "123")
+    let error = #expect(throws: Failure.self) {
+      try session.write(to: directory.appending(path: "state.json"))
+    }
+    #expect(
+      error?.description
+        == "could not create a temporary session file in \(directory.path): \(String(cString: strerror(EACCES)))"
+    )
+  }
+
+  @Test func publishingFailureIncludesDestinationAndCleansUp() throws {
+    let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString)
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let output = directory.appending(path: String(repeating: "x", count: 300))
+    let session = try ExportedSession(cookies: signedInCookies(), accountID: "123")
+    let error = #expect(throws: Failure.self) { try session.write(to: output) }
+    #expect(
+      error?.description
+        == "could not write the session to \(output.path): \(String(cString: strerror(ENAMETOOLONG)))"
+    )
+    #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty)
   }
 }
