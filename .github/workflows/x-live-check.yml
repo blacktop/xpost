@@ -1,0 +1,53 @@
+# A feasibility check against the real X, run only by hand: signs in with the dedicated
+# account, verifies it is the expected account, opens the composer and posts nothing.
+# The session state is never saved, cached or uploaded from this workflow. The account
+# secrets (XPOST_TWITTER_USER, XPOST_TWITTER_PASSWORD, XPOST_TWITTER_ACCOUNT_ID) belong to the
+# "x-live" environment.
+name: X live check
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: x-live-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Sign in and open the composer (no post)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The account lives in this environment's secrets; give it required reviewers so a run
+    # needs a person's approval.
+    environment: x-live
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
+        with:
+          package_json_file: helper/package.json
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Build xpost
+        run: swift build -c release
+
+      - name: Build the helper
+        run: just helper-setup
+
+      - name: Check X access
+        env:
+          XPOST_TWITTER_HELPER: ${{ github.workspace }}/helper
+          XPOST_TWITTER_USER: ${{ secrets.XPOST_TWITTER_USER }}
+          XPOST_TWITTER_PASSWORD: ${{ secrets.XPOST_TWITTER_PASSWORD }}
+          XPOST_TWITTER_ACCOUNT_ID: ${{ secrets.XPOST_TWITTER_ACCOUNT_ID }}
+        run: |
+          "$(swift build -c release --show-bin-path)/xpost" twitter check -V

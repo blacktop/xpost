@@ -1,7 +1,0 @@
-#!/bin/sh
-set -e
-rm -rf completions
-mkdir -p completions
-for sh in bash zsh fish powershell; do
-    go run main.go completion "$sh" >"completions/_$sh"
-done

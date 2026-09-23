@@ -1,0 +1,67 @@
+# Publishes a release when a version tag is pushed (`just bump`): builds xpost from the tag,
+# attaches the binary to a GitHub release and points the Homebrew formula at it. The binary
+# keeps the linker's ad-hoc signature and is not notarized; Homebrew installs run it as is.
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build and publish
+    runs-on: macos-26
+    timeout-minutes: 30
+    # TAP_GITHUB_TOKEN (push access to blacktop/homebrew-tap) belongs to this environment;
+    # limit its deployments to v* tags.
+    environment: release
+    permissions:
+      contents: write # create the GitHub release and upload its assets
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build
+        run: swift build -c release
+
+      - name: Package
+        run: |
+          set -euo pipefail
+          archive="dist/xpost_${GITHUB_REF_NAME#v}_macOS_arm64.tar.gz"
+          echo "ARCHIVE=$archive" >>"$GITHUB_ENV"
+          bin="$(swift build -c release --show-bin-path)/xpost"
+          codesign --verify --strict --verbose=2 "$bin"
+          # The formula's own test, before anything is published.
+          help=$("$bin" --help)
+          grep -q "Cross-post" <<<"$help"
+          stage=$(mktemp -d)
+          cp "$bin" LICENSE README.md "$stage/"
+          mkdir -p dist
+          COPYFILE_DISABLE=1 tar -C "$stage" -czf "$archive" xpost LICENSE README.md
+          (cd dist && shasum -a 256 "$(basename "$archive")" >checksums.txt)
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" --verify-tag --generate-notes "$ARCHIVE" dist/checksums.txt
+
+      - name: Bump the Homebrew formula
+        env:
+          GH_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+        run: |
+          gh auth setup-git
+          scripts/bump-formula.sh "$GITHUB_REF_NAME" "$ARCHIVE"

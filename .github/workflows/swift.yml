@@ -1,0 +1,92 @@
+name: Swift
+
+on:
+  push:
+    branches: ["main"]
+    paths-ignore:
+      - "**.md"
+  pull_request:
+    branches: ["main"]
+
+permissions: {}
+
+concurrency:
+  group: swift-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  macos:
+    name: macOS lint, build, test
+    runs-on: macos-26
+    permissions:
+      contents: read
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.6.app
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Toolchain
+        run: swift --version
+
+      - name: Lint
+        run: just lint
+
+      - name: Build
+        run: just build
+
+      - name: Test
+        run: just test
+
+  # Ubuntu 24.04 runners ship Swift and Node. The X backend here is the Chromium helper;
+  # everything it touches is a fixture server on localhost. No secrets, nothing can publish.
+  linux:
+    name: Linux build, test, fixtures
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@d9184bf108216479bc5a137cc391f4d7b14c870b # v6.1.0
+        with:
+          package_json_file: helper/package.json
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Toolchains
+        run: |
+          swift --version
+          node --version
+          pnpm --version
+
+      - name: Build
+        run: just build
+
+      - name: Test
+        run: just test
+
+      - name: Helper dependencies
+        run: |
+          pnpm --dir helper audit --audit-level=moderate
+          just helper-setup
+
+      - name: Helper checks
+        working-directory: helper
+        run: |
+          pnpm typecheck
+          pnpm lint
+          pnpm fmt
+          pnpm test
+
+      - name: xpost against the fixture X
+        run: scripts/fixture-e2e.sh "$(swift build --show-bin-path)/xpost"

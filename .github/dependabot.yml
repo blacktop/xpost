@@ -1,10 +1,12 @@
 ---
 version: 2
 updates:
-  - package-ecosystem: "gomod"
+  - package-ecosystem: "swift"
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     labels:
       - "dependencies"
     commit-message:
