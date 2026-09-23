@@ -296,6 +296,8 @@ async function saveState(context: BrowserContext, stateFile: string): Promise<vo
 /** One pass through X's login screens. Anything X asks beyond username and password stops here. */
 async function login(page: Page, request: HelperRequest, deadline: Deadline): Promise<void> {
   // The new flow keeps the old username form behind its modal. Only operate in the modal.
+  // Known gap: this is decided once, so a modal that renders after the background form is
+  // missed. X's timing hasn't been observed; saved-session runs never reach this code.
   const dialogs = page.locator('[role="dialog"]:visible');
   const surface = (await dialogs.count()) > 0 ? dialogs.last() : page.locator("body");
   const username = surface.locator(selectors.usernameInput).first();

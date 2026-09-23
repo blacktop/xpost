@@ -1,0 +1,71 @@
+# Posts one message to the real X by hand, from the exported session. Unlike the live check,
+# this publishes. There is no password fallback, and a failed or unconfirmed post is never
+# retried: check the account before running it again. The session secret is decoded into a
+# private temporary file and deleted on exit. Secrets belong to the "x-live" environment.
+name: X live post
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: Text to post to X (published for real)
+        required: true
+        type: string
+
+permissions: {}
+
+concurrency:
+  group: x-live-post
+  cancel-in-progress: false
+
+jobs:
+  post:
+    name: Post the message to X
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    # The account lives in this environment's secrets; give it required reviewers so a post
+    # needs a person's approval.
+    environment: x-live
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: helper/package.json
+
+      - uses: extractions/setup-just@53165ef7e734c5c07cb06b3c8e7b647c5aa16db3 # v4.0.0
+        with:
+          just-version: "1.58.0"
+
+      - name: Build xpost
+        run: swift build -c release
+
+      - name: Build the helper
+        run: just helper-setup
+
+      - name: Post to X
+        env:
+          XPOST_TWITTER_HELPER: ${{ github.workspace }}/helper
+          XPOST_TWITTER_USER: ${{ secrets.XPOST_TWITTER_USER }}
+          XPOST_TWITTER_STATE_B64: ${{ secrets.XPOST_TWITTER_STATE_B64 }}
+          XPOST_TWITTER_ACCOUNT_ID: ${{ secrets.XPOST_TWITTER_ACCOUNT_ID }}
+          MESSAGE: ${{ inputs.message }}
+        run: |
+          set -euo pipefail
+          umask 077
+          session_dir=$(mktemp -d)
+          trap 'rm -rf "$session_dir"' EXIT
+          if [ -z "$XPOST_TWITTER_STATE_B64" ]; then
+            echo "Set the x-live secret XPOST_TWITTER_STATE_B64 from a fresh exported session."
+            exit 1
+          fi
+          printf '%s' "$XPOST_TWITTER_STATE_B64" | base64 --decode > "$session_dir/state.json"
+          unset XPOST_TWITTER_STATE_B64
+          export XPOST_TWITTER_STATE_FILE="$session_dir/state.json"
+          # stdin keeps the message out of argument parsing.
+          printf '%s' "$MESSAGE" | env -u XPOST_TWITTER_PASSWORD \
+            "$(swift build -c release --show-bin-path)/xpost" --target twitter -V
