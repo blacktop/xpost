@@ -86,17 +86,17 @@ import Testing
     let pipe = Pipe()
     // Bound a regression's wait: the old implementation missed this cancellation.
     let closer = Task {
-      try await Task.sleep(for: .milliseconds(500))
+      try await Task.sleep(for: .seconds(5))
       try pipe.fileHandleForWriting.close()
     }
-    let started = ContinuousClock.now
     let reader = Task {
       withUnsafeCurrentTask { $0?.cancel() }
       return try await readPipedInput(from: pipe.fileHandleForReading)
     }
     await #expect(throws: CancellationError.self) { try await reader.value }
-    #expect(ContinuousClock.now - started < .milliseconds(400))
-    try await closer.value
+    // Order, not wall time: a closer that got to close the pipe means the reader waited for EOF.
+    closer.cancel()
+    await #expect(throws: CancellationError.self) { try await closer.value }
   }
 
   @Test func racingEOFAndCancellationResumesOnlyOnce() async throws {
